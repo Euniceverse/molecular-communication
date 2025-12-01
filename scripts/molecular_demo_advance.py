@@ -5,15 +5,30 @@ import rospy
 import serial
 from geometry_msgs.msg import Twist
 
-# -------------------- Params --------------------
-def p(name, default): return rospy.get_param("~"+name, default)
+# -------------------- Helpers --------------------
+def p(name, default):
+    return rospy.get_param("~" + name, default)
+
+def clamp(x, lo, hi):
+    return lo if x < lo else hi if x > hi else x
+
+def write_cmd(ser, s):
+    ser.write((s if s.endswith("\n") else s + "\n").encode("ascii", errors="ignore"))
 
 def readline_float_if_sensor(ser):
+    """
+    Expect Arduino lines like:
+      READY
+      R <float>
+    Returns float for R-lines, otherwise None.
+    """
     try:
         line = ser.readline().decode("ascii", errors="ignore").strip()
-        if not line or not line.startswith("R "):
+        if not line:
             return None
-        return float(line.split()[1])
+        if line.startswith("R "):
+            return float(line.split()[1])
+        return None
     except Exception:
         return None
 
@@ -28,9 +43,13 @@ def wait_for_ready(ser, timeout=5.0):
             return True
     return False
 
-def write_cmd(ser, s):
-    ser.write((s if s.endswith("\n") else s+"\n").encode("ascii"))
+def publish_stop(pub, n=5, dt=0.02):
+    z = Twist()
+    for _ in range(n):
+        pub.publish(z)
+        rospy.sleep(dt)
 
+# -------------------- Main --------------------
 def main():
     rospy.init_node("molecular_demo_tx")
 
@@ -46,18 +65,52 @@ def main():
     PRIME_BASELINE_S  = float(p("prime_baseline_sec", 3.0))
     USE_READY         = bool(p("use_ready", False))
 
-    # Motion params (direct publish)
+    # Motion + control params
     CMD_TOPIC         = p("cmd_vel_topic", "/cmd_vel")
-    SPEED_LIN         = float(p("speed_linear", 0.04))
-    SPEED_ANG         = float(p("speed_angular", 0.0))
-    MOVE_TIME         = float(p("move_time", 2.0))
-    PUB_RATE_HZ       = float(p("publish_rate", 20.0))  # continuous stream
+
+    # Control uses either raw sensor or (value - baseline)
+    CONTROL_SIGNAL    = p("control_signal", "diff")  # "diff" or "raw"
+
+    # If True: during control, baseline is frozen (recommended if baseline drift breaks control)
+    FREEZE_BASELINE_DURING_CONTROL = bool(p("freeze_baseline_during_control", True))
+
+    TARGET            = float(p("target", 120.0))    # target RAW or target DIFF depending on CONTROL_SIGNAL
+    TOL               = float(p("tolerance", 10.0))  # stop band ±
+    KP                = float(p("kp", 0.002))        # proportional gain
+    MAX_SPEED         = float(p("max_speed", 0.06))  # clamp speed
+    CONTROL_HZ        = float(p("control_rate", 20.0))
+    CONTROL_TIMEOUT   = float(p("control_timeout", 20.0))
+    SETTLE_COUNT      = int(p("settle_count", 8))    # consecutive samples within tolerance
+
+    # Direction convention:
+    # We compute  error = TARGET - signal
+    # cmd.linear.x = KP * error
+    # If robot moves the wrong way, set invert_cmd:=True.
+    INVERT_CMD        = bool(p("invert_cmd", False))
 
     # Publishers
     cmd_pub = rospy.Publisher(CMD_TOPIC, Twist, queue_size=1)
 
+    def on_shutdown():
+        try:
+            publish_stop(cmd_pub)
+        except Exception:
+            pass
+        try:
+            if ser is not None:
+                write_cmd(ser, "S0")
+                ser.close()
+        except Exception:
+            pass
+
+    rospy.on_shutdown(on_shutdown)
+
     rospy.loginfo("Opening serial %s @ %d ...", PORT, BAUD)
-    ser = serial.Serial(PORT, BAUD, timeout=1.0)
+    try:
+        ser = serial.Serial(PORT, BAUD, timeout=1.0)
+    except Exception as e:
+        rospy.logerr("Failed to open serial %s: %s", PORT, str(e))
+        return
 
     # Handle Arduino reset when serial opens
     rospy.loginfo("Waiting for Arduino reboot/handshake...")
@@ -78,7 +131,7 @@ def main():
     write_cmd(ser, "S1"); rospy.sleep(0.2)
     write_cmd(ser, "S0"); rospy.loginfo("Arduino primed.")
 
-    # Prime baseline
+    # Prime baseline (EMA)
     baseline = None
     if PRIME_BASELINE_S > 0.0:
         rospy.loginfo("Priming baseline for %.1f s ...", PRIME_BASELINE_S)
@@ -86,16 +139,15 @@ def main():
         while (rospy.Time.now() - t0).to_sec() < PRIME_BASELINE_S and not rospy.is_shutdown():
             val = readline_float_if_sensor(ser)
             if val is not None:
-                baseline = val if baseline is None else (1.0-BASELINE_ALPHA)*baseline + BASELINE_ALPHA*val
+                baseline = val if baseline is None else (1.0 - BASELINE_ALPHA) * baseline + BASELINE_ALPHA * val
         if baseline is not None:
             rospy.loginfo("Initial baseline: %.2f", baseline)
 
     sensor_rate = rospy.Rate(20)
     first_cycle = True
 
-    # Prebuilt Twist messages
-    tw_go   = Twist(); tw_go.linear.x = SPEED_LIN; tw_go.linear.y = 0; tw_go.linear.z = 0; tw_go.angular.x= 0; tw_go.angular.y= 0; tw_go.angular.z= 0
-    tw_stop = Twist()
+    rospy.loginfo("Control mode: signal=%s target=%.2f tol=%.2f kp=%.4f max_speed=%.3f invert_cmd=%s",
+                  CONTROL_SIGNAL, TARGET, TOL, KP, MAX_SPEED, str(INVERT_CMD))
 
     while not rospy.is_shutdown():
         try:
@@ -113,7 +165,7 @@ def main():
         write_cmd(ser, "S0")
         rospy.loginfo("Spray OFF, waiting (timeout=%.1f s)", WAIT_TIMEOUT)
 
-        # 2) WAIT FOR RECEPTION
+        # 2) WAIT FOR RECEPTION (diff threshold)
         received = False
         start_wait = rospy.Time.now()
 
@@ -130,10 +182,10 @@ def main():
             if baseline is None:
                 baseline = value
             else:
-                baseline = (1.0-BASELINE_ALPHA)*baseline + BASELINE_ALPHA*value
+                baseline = (1.0 - BASELINE_ALPHA) * baseline + BASELINE_ALPHA * value
 
             diff = value - baseline
-            rospy.loginfo("value=%.1f, baseline=%.1f, diff=%.1f", value, baseline, diff)
+            rospy.loginfo("WAIT value=%.1f baseline=%.1f diff=%.1f (thr=%.1f)", value, baseline, diff, DIFF_THRESHOLD)
 
             if diff >= DIFF_THRESHOLD:
                 received = True
@@ -143,19 +195,73 @@ def main():
 
         first_cycle = False
 
-        # 3) MOVE: publish /cmd_vel continuously for MOVE_TIME
+        # 3) CLOSED-LOOP MOVE until signal ~= TARGET
         if received:
-            rospy.loginfo(">>> GAS RECEIVED: moving for %.1f s on %s", MOVE_TIME, CMD_TOPIC)
+            rospy.loginfo(">>> RECEIVED: closed-loop moving until %s ~= %.1f (tol=%.1f)",
+                          CONTROL_SIGNAL, TARGET, TOL)
+
+            # Optionally freeze baseline once control starts
+            frozen_baseline = baseline
+
+            rate = rospy.Rate(CONTROL_HZ)
             t0 = rospy.Time.now()
-            rate = rospy.Rate(PUB_RATE_HZ)
-            while (rospy.Time.now() - t0).to_sec() < MOVE_TIME and not rospy.is_shutdown():
-                cmd_pub.publish(tw_go)
+            ok_streak = 0
+
+            while not rospy.is_shutdown():
+                if (rospy.Time.now() - t0).to_sec() > CONTROL_TIMEOUT:
+                    rospy.logwarn("Control timeout reached; stopping.")
+                    break
+
+                value = readline_float_if_sensor(ser)
+                if value is None:
+                    rate.sleep()
+                    continue
+
+                # Baseline update (or freeze)
+                if baseline is None:
+                    baseline = value
+
+                if FREEZE_BASELINE_DURING_CONTROL:
+                    baseline_used = frozen_baseline if frozen_baseline is not None else baseline
+                else:
+                    baseline = (1.0 - BASELINE_ALPHA) * baseline + BASELINE_ALPHA * value
+                    baseline_used = baseline
+
+                diff = value - baseline_used
+
+                # Choose signal
+                if CONTROL_SIGNAL.lower() == "raw":
+                    signal = value
+                else:
+                    signal = diff
+
+                error = TARGET - signal  # positive -> signal too low -> move "closer" (subject to invert_cmd)
+                if abs(error) <= TOL:
+                    ok_streak += 1
+                else:
+                    ok_streak = 0
+
+                if ok_streak >= SETTLE_COUNT:
+                    rospy.loginfo("Target reached: value=%.1f base=%.1f diff=%.1f signal=%.1f",
+                                  value, baseline_used, diff, signal)
+                    break
+
+                v = KP * error
+                if INVERT_CMD:
+                    v = -v
+                v = clamp(v, -MAX_SPEED, MAX_SPEED)
+
+                tw = Twist()
+                tw.linear.x = v
+                cmd_pub.publish(tw)
+
+                rospy.loginfo("CTRL value=%.1f base=%.1f diff=%.1f signal=%.1f err=%.1f v=%.3f ok=%d/%d",
+                              value, baseline_used, diff, signal, error, v, ok_streak, SETTLE_COUNT)
+
                 rate.sleep()
-            # stop (publish a few zeros just to be sure)
-            for _ in range(3):
-                cmd_pub.publish(tw_stop)
-                rospy.sleep(0.02)
-            rospy.loginfo("Move done.")
+
+            publish_stop(cmd_pub)
+            rospy.loginfo("Control done.")
         else:
             rospy.loginfo("Cycle ended without reception")
 

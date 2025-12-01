@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import math
 import rospy
 import serial
 from geometry_msgs.msg import Twist
@@ -26,7 +27,7 @@ def wait_for_ready(ser, timeout=5.0):
     return False
 
 def readline_sensor_value(ser):
-    """Expect lines like: 'R <float>'. Return float or None."""
+    """Expect Arduino lines like: 'R <float>'. Return float or None."""
     try:
         line = ser.readline().decode("ascii", errors="ignore").strip()
         if not line:
@@ -44,30 +45,26 @@ def publish_stop(pub, n=5, dt=0.02):
         rospy.sleep(dt)
 
 def main():
-    rospy.init_node("molecular_demo_homing")
+    rospy.init_node("molecular_demo_homing_decay")
 
     # ---- Serial ----
     PORT      = p("port", "/dev/ttyUSB1")
     BAUD      = int(p("baud", 57600))
     USE_READY = bool(p("use_ready", False))
 
-    # ---- Optional spray + receive gate ----
+    # ---- Spray + receive gate ----
     ENABLE_SPRAY_CYCLE = bool(p("enable_spray_cycle", True))
     SPRAY_TIME         = float(p("spray_time", 5.0))
     WAIT_TIMEOUT       = float(p("wait_timeout", 40.0))
-    DIFF_THRESHOLD     = float(p("diff_threshold", 300.0))
+    THRESHOLD_SIGNAL   = float(p("threshold_signal", 250.0))  # threshold on chosen signal ("raw" or "diff")
 
-    # ---- Baseline background (for diff mode) ----
+    # ---- Baseline for diff-mode ----
+    CONTROL_SIGNAL   = p("control_signal", "raw").lower()  # "raw" or "diff"
     PRIME_BASELINE_S = float(p("prime_baseline_sec", 3.0))
     BASELINE_ALPHA   = float(p("baseline_alpha", 0.05))
 
-    # ---- Control signal ----
-    # raw:  signal = value
-    # diff: signal = value - baseline_bg  (baseline_bg is primed before spraying)
-    CONTROL_SIGNAL = p("control_signal", "raw").lower()  # "raw" or "diff"
-
-    # ---- "Bookmark" capture ----
-    CAPTURE_SEC = float(p("capture_sec", 1.5))  # average signal for this long after reception
+    # ---- Capture initial home value ----
+    CAPTURE_SEC = float(p("capture_sec", 2.0))  # average this long to get target0
 
     # ---- Motion control ----
     CMD_TOPIC    = p("cmd_vel_topic", "/cmd_vel")
@@ -76,19 +73,21 @@ def main():
     TOL          = float(p("tolerance", 10.0))
     RATE_HZ      = float(p("rate_hz", 20.0))
     INVERT_CMD   = bool(p("invert_cmd", False))
+    HOLD_TIME    = float(p("hold_time", 0.0))   # 0 = infinite
 
-    # ---- Drift compensation (decay handling) ----
-    # We ONLY adapt the target when we believe we are already "at the right place".
-    # target <- (1-alpha)*target + alpha*signal
-    TARGET_ALPHA     = float(p("target_alpha", 0.01))   # smaller = slower drift-follow
-    DRIFT_WINDOW     = float(p("drift_window", 2.5 * TOL))  # allow adaptation inside this error band
-    V_DEADBAND       = float(p("v_deadband", 0.01))     # consider "not moving" if |v| < this
-    REQUIRE_STABLE_N = int(p("require_stable_n", 10))   # consecutive stable ticks before adapting aggressively
+    # ---- Decay model (the key part) ----
+    # target(t) = floor + (target0 - floor) * exp(-lambda * dt)
+    DECAY_HALFLIFE_S = float(p("decay_halflife_sec", 60.0))  # intuitive tuning knob (seconds)
+    DECAY_FLOOR      = float(p("decay_floor", 0.0))          # diff-mode usually 0. raw-mode maybe ambient reading.
+    # Optional: lightly learn floor from observations when "near home"
+    LEARN_FLOOR       = bool(p("learn_floor", False))
+    FLOOR_ALPHA       = float(p("floor_alpha", 0.001))       # very slow
+    FLOOR_UPDATE_BAND = float(p("floor_update_band", 3.0*TOL))
 
-    # ---- Safety ----
+    # ---- Stability safety ----
     STOP_ON_NO_SENSOR = bool(p("stop_on_no_sensor", True))
-    CONTROL_TIMEOUT   = float(p("control_timeout", 0.0))  # 0 = infinite hold
 
+    # Publisher
     cmd_pub = rospy.Publisher(CMD_TOPIC, Twist, queue_size=1)
 
     ser = None
@@ -106,6 +105,7 @@ def main():
             pass
     rospy.on_shutdown(shutdown_hook)
 
+    # ---- Open serial ----
     rospy.loginfo("Opening serial %s @ %d ...", PORT, BAUD)
     ser = serial.Serial(PORT, BAUD, timeout=1.0)
 
@@ -122,7 +122,7 @@ def main():
     except Exception:
         pass
 
-    # ---- Prime baseline background (used for diff mode) ----
+    # ---- Prime diff baseline background (ambient) ----
     baseline_bg = None
     if CONTROL_SIGNAL == "diff":
         rospy.loginfo("Priming baseline background for %.1f s (diff mode)...", PRIME_BASELINE_S)
@@ -134,41 +134,36 @@ def main():
             baseline_bg = v if baseline_bg is None else (1.0 - BASELINE_ALPHA) * baseline_bg + BASELINE_ALPHA * v
         rospy.loginfo("baseline_bg=%.2f", baseline_bg if baseline_bg is not None else float("nan"))
 
-    def get_signal(value):
+    def signal_from_value(value):
         if CONTROL_SIGNAL == "raw":
             return value
-        # diff
+        # diff mode
         if baseline_bg is None:
             return 0.0
         return value - baseline_bg
 
-    # ---- (Optional) prime sprayer relay ----
-    if ENABLE_SPRAY_CYCLE:
-        write_cmd(ser, "S0"); rospy.sleep(0.2)
-        write_cmd(ser, "S1"); rospy.sleep(0.2)
-        write_cmd(ser, "S0"); rospy.sleep(0.2)
-        rospy.loginfo("Sprayer primed.")
+    # ---- decay lambda ----
+    if DECAY_HALFLIFE_S <= 0:
+        lam = 0.0
+    else:
+        lam = math.log(2.0) / DECAY_HALFLIFE_S
+
+    rospy.loginfo("Decay model: target(t)=floor+(target0-floor)*exp(-lam*dt), half-life=%.1fs lam=%.5f floor=%.2f",
+                  DECAY_HALFLIFE_S, lam, DECAY_FLOOR)
 
     # =========================
-    # 1) ACQUIRE: get initial "bookmark" target
+    # 1) ACQUIRE: spray + wait + capture initial home target0
     # =========================
-    rospy.loginfo("ACQUIRE: will bookmark target signal at first reception.")
-    target = None
-
     if ENABLE_SPRAY_CYCLE:
         rospy.loginfo("Spray ON for %.1f s", SPRAY_TIME)
         write_cmd(ser, "S1")
         rospy.sleep(SPRAY_TIME)
         write_cmd(ser, "S0")
-        rospy.loginfo("Spray OFF. Waiting up to %.1f s for reception (diff_threshold=%.1f).",
-                      WAIT_TIMEOUT, DIFF_THRESHOLD)
+        rospy.loginfo("Spray OFF. Waiting up to %.1f s for reception (threshold_signal=%.1f, signal=%s).",
+                      WAIT_TIMEOUT, THRESHOLD_SIGNAL, CONTROL_SIGNAL)
 
         start_wait = rospy.Time.now()
         received = False
-
-        # note: reception logic uses DIFF (value-baseline_bg) if diff mode, else uses RAW threshold gate?
-        # For simplicity: reception gate always uses "signal" and compares to DIFF_THRESHOLD when in diff mode,
-        # and uses raw when in raw mode (you can tune DIFF_THRESHOLD accordingly).
         while not rospy.is_shutdown() and not received:
             if (rospy.Time.now() - start_wait).to_sec() > WAIT_TIMEOUT:
                 rospy.logwarn("No reception within timeout. Exiting.")
@@ -177,52 +172,48 @@ def main():
             value = readline_sensor_value(ser)
             if value is None:
                 continue
+            sig = signal_from_value(value)
+            rospy.loginfo("WAIT value=%.1f signal=%.1f", value, sig)
 
-            signal = get_signal(value)
-            rospy.loginfo("WAIT value=%.1f signal(%s)=%.1f", value, CONTROL_SIGNAL, signal)
-
-            if signal >= DIFF_THRESHOLD:
+            if sig >= THRESHOLD_SIGNAL:
                 received = True
                 rospy.loginfo("RECEIVED: gate triggered.")
                 break
-    else:
-        rospy.loginfo("enable_spray_cycle=false, capturing target immediately from current readings.")
 
-    # Capture/average target for CAPTURE_SEC
-    rospy.loginfo("Capturing target for %.1f s (averaging signal)...", CAPTURE_SEC)
+    rospy.loginfo("Capturing home target0 for %.1f s (averaging signal)...", CAPTURE_SEC)
     cap_start = rospy.Time.now()
     acc, n = 0.0, 0
     while not rospy.is_shutdown() and (rospy.Time.now() - cap_start).to_sec() < CAPTURE_SEC:
         value = readline_sensor_value(ser)
         if value is None:
             continue
-        signal = get_signal(value)
-        acc += signal
+        sig = signal_from_value(value)
+        acc += sig
         n += 1
 
     if n == 0:
-        rospy.logerr("Could not capture target: no sensor values.")
+        rospy.logerr("Could not capture target0: no sensor readings.")
         return
 
-    target = acc / n
-    rospy.loginfo("BOOKMARKED target=%.2f (signal=%s, n=%d)", target, CONTROL_SIGNAL, n)
+    target0 = acc / n
+    t0 = rospy.Time.now()  # "home time"
+    rospy.loginfo("BOOKMARKED: target0=%.2f at t0=%s (signal=%s, n=%d)", target0, str(t0.to_sec()), CONTROL_SIGNAL, n)
 
     # =========================
-    # 2) HOLD: always try to return to the bookmarked signal,
-    #          but allow target to drift slowly downward/upward when stable.
+    # 2) HOLD: always return to the decaying target(t)
     # =========================
-    rospy.loginfo("HOLD: if you move the robot, it will drive to restore signal to target.")
-    rospy.loginfo("Drift compensation: target_alpha=%.4f, drift_window=%.2f", TARGET_ALPHA, DRIFT_WINDOW)
-
     rate = rospy.Rate(RATE_HZ)
-    t_hold0 = rospy.Time.now()
-    stable_ticks = 0
-    last_cmd_v = 0.0
+    hold_start = rospy.Time.now()
 
     while not rospy.is_shutdown():
-        if CONTROL_TIMEOUT > 0.0 and (rospy.Time.now() - t_hold0).to_sec() > CONTROL_TIMEOUT:
-            rospy.logwarn("Control timeout reached; stopping.")
+        if HOLD_TIME > 0.0 and (rospy.Time.now() - hold_start).to_sec() > HOLD_TIME:
+            rospy.loginfo("Hold time ended; stopping.")
             break
+
+        now = rospy.Time.now()
+        dt = (now - t0).to_sec()
+        # predicted target at the original place, considering decay
+        target_t = DECAY_FLOOR + (target0 - DECAY_FLOOR) * math.exp(-lam * max(0.0, dt))
 
         value = readline_sensor_value(ser)
         if value is None:
@@ -231,47 +222,35 @@ def main():
             rate.sleep()
             continue
 
-        signal = get_signal(value)
-        error = target - signal
+        sig = signal_from_value(value)
+        error = target_t - sig
 
-        # P-control
+        # Optional: learn floor VERY slowly when near home band (helps raw-mode)
+        if LEARN_FLOOR and abs(error) <= FLOOR_UPDATE_BAND:
+            DECAY_FLOOR = (1.0 - FLOOR_ALPHA) * DECAY_FLOOR + FLOOR_ALPHA * sig
+
+        # P control
         v = KP * error
         if INVERT_CMD:
             v = -v
         v = clamp(v, -MAX_SPEED, MAX_SPEED)
 
-        # Deadband stop
         if abs(error) <= TOL:
             publish_stop(cmd_pub, n=1, dt=0.0)
+            v_out = 0.0
         else:
             tw = Twist()
             tw.linear.x = v
             cmd_pub.publish(tw)
+            v_out = v
 
-        # Stability detection (for safe target adaptation)
-        moving = abs(v) > V_DEADBAND
-        near_enough_for_drift = abs(error) <= DRIFT_WINDOW
+        rospy.loginfo("dt=%.1f target(t)=%.1f signal=%.1f err=%.1f cmd_v=%.3f floor=%.1f",
+                      dt, target_t, sig, error, v_out, DECAY_FLOOR)
 
-        if (not moving) and near_enough_for_drift:
-            stable_ticks += 1
-        else:
-            stable_ticks = 0
-
-        # Drift compensation: only adapt when stable for a bit
-        if stable_ticks >= REQUIRE_STABLE_N and near_enough_for_drift:
-            target = (1.0 - TARGET_ALPHA) * target + TARGET_ALPHA * signal
-
-        # Logging
-        rospy.loginfo(
-            "value=%.1f signal=%.1f target=%.1f err=%.1f cmd_v=%.3f stable=%d",
-            value, signal, target, error, (0.0 if abs(error) <= TOL else v), stable_ticks
-        )
-
-        last_cmd_v = v
         rate.sleep()
 
     publish_stop(cmd_pub)
-    rospy.loginfo("Exited HOLD, stopped.")
+    rospy.loginfo("Stopped.")
 
 if __name__ == "__main__":
     try:

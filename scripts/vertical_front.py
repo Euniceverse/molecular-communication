@@ -96,6 +96,10 @@ def main():
     MOVE_TIME   = float(p("move_time", 2.0))
     PUB_RATE_HZ = float(p("publish_rate", 20.0))
 
+    # Rest time 
+    REST_TIME         = float(p("rest_time", 5.0))
+
+
     # Control topic
     CONTROL_TOPIC = p("control_topic", "/molecular_demo/control")
     rospy.Subscriber(CONTROL_TOPIC, String, control_cb, queue_size=1)
@@ -226,6 +230,8 @@ def main():
         publish_stop(cmd_pub, tw_stop)
 
         first_cycle = False
+
+        rospy.sleep(REST_TIME)
 
         # COOLDOWN
         if not sleep_while_running(COOLDOWN_TIME):

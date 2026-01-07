@@ -102,6 +102,9 @@ def main():
     MOVE_TIME         = float(p("move_time", 2.0))
     PUB_RATE_HZ       = float(p("publish_rate", 20.0))
 
+    # Rest time 
+    REST_TIME         = float(p("rest_time", 5.0))
+
     # Control topic
     CONTROL_TOPIC     = p("control_topic", "/molecular_demo/control")
     rospy.Subscriber(CONTROL_TOPIC, String, control_cb, queue_size=1)
@@ -230,6 +233,8 @@ def main():
 
             publish_stop(cmd_pub, tw_stop, repeats=8)
             rospy.loginfo("Move done.")
+
+            rospy.sleep(REST_TIME)
         else:
             rospy.loginfo("Cycle ended without reception")
 

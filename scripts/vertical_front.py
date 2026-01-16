@@ -176,19 +176,8 @@ def main():
             ser.reset_input_buffer()
         except Exception:
             pass
-        baseline = capture_baseline_window(ser, PRIME_BASELINE_S, _run_event, rate_hz=20.0)
 
-        if baseline is None:
-            # either stopped mid-capture or no sensor data
-            if not _run_event.is_set():
-                emergency_stop(ser, cmd_pub, tw_stop)
-                wait_until_running()
-            else:
-                rospy.logwarn("Baseline capture failed (no data). Skipping this round.")
-                rospy.sleep(0.5)
-            continue
-
-        rospy.loginfo("Round baseline fixed: %.2f", baseline)
+        rospy.sleep(PRIME_BASELINE_S)
 
         # 1) SPRAY
         rospy.loginfo("Spray ON for %.1f s", SPRAY_TIME)
@@ -210,6 +199,26 @@ def main():
             cmd_pub.publish(tw_go)
             rate.sleep()
         publish_stop(cmd_pub, tw_stop)
+
+        # 3) Wait cooldown
+        rospy.loginfo("Cooling down for %.1f s", COOLDOWN_TIME)
+        rospy.sleep(COOLDOWN_TIME)
+
+        # 3) CAPTURE BASELINE
+        baseline = capture_baseline_window(ser, PRIME_BASELINE_S, _run_event, rate_hz=20.0)
+
+        if baseline is None:
+            # either stopped mid-capture or no sensor data
+            if not _run_event.is_set():
+                emergency_stop(ser, cmd_pub, tw_stop)
+                wait_until_running()
+            else:
+                rospy.logwarn("Baseline capture failed (no data). Skipping this round.")
+                rospy.sleep(0.5)
+            continue
+
+        rospy.loginfo("Round baseline fixed: %.2f", baseline)
+
 
         # 4) DETECT (compare to frozen baseline)
         rospy.loginfo("Detecting for up to %.1f s (threshold %.1f)...", WAIT_TIMEOUT, DIFF_THRESHOLD)

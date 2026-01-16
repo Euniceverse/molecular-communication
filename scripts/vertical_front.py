@@ -198,15 +198,15 @@ def main():
         baseline = capture_baseline_window(ser, PRIME_BASELINE_S, _run_event, rate_hz=20.0)
 
         if baseline is None:
-        # either stopped mid-capture or no sensor data
-        if not _run_event.is_set():
-            emergency_stop(ser, cmd_pub, tw_stop)
-            wait_until_running()
-        else:
-            rospy.logwarn("Baseline capture failed (no data). Skipping this round.")
-            rospy.sleep(0.5)
-        continue
-        
+            # either stopped mid-capture or no sensor data
+            if not _run_event.is_set():
+                emergency_stop(ser, cmd_pub, tw_stop)
+                wait_until_running()
+            else:
+                rospy.logwarn("Baseline capture failed (no data). Skipping this round.")
+                rospy.sleep(0.5)
+            continue
+
         rospy.loginfo("Round baseline fixed: %.2f", baseline)
 
         # Cycle 2+ : wait for reception BEFORE spraying

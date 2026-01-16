@@ -53,6 +53,30 @@ def wait_until_running():
     while not rospy.is_shutdown() and not _run_event.is_set():
         rospy.sleep(0.1)
 
+def capture_baseline_window(ser, duration_s, run_event, rate_hz=20.0):
+    """Capture baseline for duration_s seconds. Returns float baseline or None."""
+    if duration_s <= 0:
+        return None
+
+    vals = []
+    t0 = rospy.Time.now()
+    rate = rospy.Rate(rate_hz)
+
+    while not rospy.is_shutdown() and (rospy.Time.now() - t0).to_sec() < duration_s:
+        if not run_event.is_set():
+            return None
+
+        v = readline_float_if_sensor(ser)
+        if v is not None:
+            vals.append(v)
+
+        rate.sleep()
+
+    if not vals:
+        return None
+
+    return sum(vals) / len(vals)
+
 def sleep_while_running(duration_s):
     t0 = rospy.Time.now()
     while not rospy.is_shutdown():
@@ -170,6 +194,21 @@ def main():
             wait_until_running()
             continue
 
+        rospy.loginfo("Capturing baseline for %.1f s (this round)...", PRIME_BASELINE_S)
+        baseline = capture_baseline_window(ser, PRIME_BASELINE_S, _run_event, rate_hz=20.0)
+
+        if baseline is None:
+        # either stopped mid-capture or no sensor data
+        if not _run_event.is_set():
+            emergency_stop(ser, cmd_pub, tw_stop)
+            wait_until_running()
+        else:
+            rospy.logwarn("Baseline capture failed (no data). Skipping this round.")
+            rospy.sleep(0.5)
+        continue
+        
+        rospy.loginfo("Round baseline fixed: %.2f", baseline)
+
         # Cycle 2+ : wait for reception BEFORE spraying
         if not first_cycle:
             received = False
@@ -191,7 +230,6 @@ def main():
                     sensor_rate.sleep()
                     continue
 
-                baseline = value if baseline is None else (1.0 - BASELINE_ALPHA) * baseline + BASELINE_ALPHA * value
                 diff = value - baseline
                 rospy.loginfo("value=%.1f, baseline=%.1f, diff=%.1f", value, baseline, diff)
 

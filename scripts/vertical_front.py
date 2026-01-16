@@ -190,7 +190,29 @@ def main():
 
         rospy.loginfo("Round baseline fixed: %.2f", baseline)
 
-        # Cycle 2+ : wait for reception BEFORE spraying
+        # 1) SPRAY
+        rospy.loginfo("Spray ON for %.1f s", SPRAY_TIME)
+        write_cmd(ser, "S1")
+        ok = sleep_while_running(SPRAY_TIME)
+        write_cmd(ser, "S0")
+        if not ok:
+            emergency_stop(ser, cmd_pub, tw_stop)
+            wait_until_running()
+            continue
+
+        # 2) MOVE
+        rospy.loginfo("Moving for %.1f s on %s", MOVE_TIME, CMD_TOPIC)
+        t0 = rospy.Time.now()
+        rate = rospy.Rate(PUB_RATE_HZ)
+        while (rospy.Time.now() - t0).to_sec() < MOVE_TIME and not rospy.is_shutdown():
+            if not _run_event.is_set():
+                break
+            cmd_pub.publish(tw_go)
+            rate.sleep()
+        publish_stop(cmd_pub, tw_stop)
+
+        # 4) DETECT (compare to frozen baseline)
+        rospy.loginfo("Detecting for up to %.1f s (threshold %.1f)...", WAIT_TIMEOUT, DIFF_THRESHOLD)
         received = False
         start_wait = rospy.Time.now()
 
@@ -202,7 +224,7 @@ def main():
                 continue
 
             if (rospy.Time.now() - start_wait).to_sec() > WAIT_TIMEOUT:
-                rospy.logwarn("No reception within timeout; skip spray this cycle.")
+                rospy.logwarn("No reception within timeout.")
                 break
 
             value = readline_float_if_sensor(ser)
@@ -215,49 +237,12 @@ def main():
 
             if diff >= DIFF_THRESHOLD:
                 received = True
+                rospy.loginfo("RECEIVED! diff %.1f >= %.1f", diff, DIFF_THRESHOLD)
                 break
 
             sensor_rate.sleep()
 
-        if not received:
-            if not sleep_while_running(COOLDOWN_TIME):
-                emergency_stop(ser, cmd_pub, tw_stop)
-                wait_until_running()
-            continue
-
-        # SPRAY (Cycle 1 always sprays; Cycle 2+ sprays only if received)
-        rospy.loginfo("Spray ON for %.1f s", SPRAY_TIME)
-        write_cmd(ser, "S1")
-        ok = sleep_while_running(SPRAY_TIME)
-        write_cmd(ser, "S0")
-
-        if not ok:
-            emergency_stop(ser, cmd_pub, tw_stop)
-            wait_until_running()
-            continue
-
-        # MOVE
-        rospy.loginfo("Moving for %.1f s on %s", MOVE_TIME, CMD_TOPIC)
-        t0 = rospy.Time.now()
-        rate = rospy.Rate(PUB_RATE_HZ)
-        while (rospy.Time.now() - t0).to_sec() < MOVE_TIME and not rospy.is_shutdown():
-            if not _run_event.is_set():
-                break
-            cmd_pub.publish(tw_go)
-            rate.sleep()
-        publish_stop(cmd_pub, tw_stop)
-
-        rospy.loginfo("Rest for %.1f s", REST_TIME)
-        if not sleep_while_running(REST_TIME):
-            emergency_stop(ser, cmd_pub, tw_stop)
-            wait_until_running()
-            continue
-
-        # COOLDOWN
-        if not sleep_while_running(COOLDOWN_TIME):
-            emergency_stop(ser, cmd_pub, tw_stop)
-            wait_until_running()
-            continue
+        # loop repeats -> next baseline capture
 
 if __name__ == "__main__":
     try:

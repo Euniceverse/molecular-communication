@@ -106,7 +106,6 @@ def main():
     PORT           = p("port", "/dev/ttyUSB0")
     BAUD           = int(p("baud", 57600))
     DIFF_THRESHOLD = float(p("diff_threshold", 300.0))
-    BASELINE_ALPHA = float(p("baseline_alpha", 0.05))
     SPRAY_TIME     = float(p("spray_time", 5.0))
     COOLDOWN_TIME  = float(p("cooldown_time", 5.0))
     WAIT_TIMEOUT   = float(p("wait_timeout", 40.0))
@@ -164,29 +163,7 @@ def main():
     write_cmd(ser, "S1"); rospy.sleep(0.2)
     write_cmd(ser, "S0"); rospy.loginfo("Arduino primed.")
 
-    # Prime baseline
-    baseline = None
-    if PRIME_BASELINE_S > 0.0:
-        rospy.loginfo("Priming baseline for %.1f s ...", PRIME_BASELINE_S)
-        t0 = rospy.Time.now()
-        while (rospy.Time.now() - t0).to_sec() < PRIME_BASELINE_S and not rospy.is_shutdown():
-            if not _run_event.is_set():
-                emergency_stop(ser, cmd_pub, tw_stop)
-                wait_until_running()
-                t0 = rospy.Time.now()
-                continue
-
-            val = readline_float_if_sensor(ser)
-            if val is not None:
-                baseline = val if baseline is None else (1.0 - BASELINE_ALPHA) * baseline + BASELINE_ALPHA * val
-
-        if baseline is not None:
-            rospy.loginfo("Initial baseline: %.2f", baseline)
-
     sensor_rate = rospy.Rate(20)
-    first_cycle = True
-
-    rospy.loginfo("Running cycles (front). Cycle1 sprays no matter what; later cycles spray only after receive.")
 
     while not rospy.is_shutdown():
         if not _run_event.is_set():
@@ -195,6 +172,10 @@ def main():
             continue
 
         rospy.loginfo("Capturing baseline for %.1f s (this round)...", PRIME_BASELINE_S)
+        try:
+            ser.reset_input_buffer()
+        except Exception:
+            pass
         baseline = capture_baseline_window(ser, PRIME_BASELINE_S, _run_event, rate_hz=20.0)
 
         if baseline is None:
@@ -210,40 +191,39 @@ def main():
         rospy.loginfo("Round baseline fixed: %.2f", baseline)
 
         # Cycle 2+ : wait for reception BEFORE spraying
-        if not first_cycle:
-            received = False
-            start_wait = rospy.Time.now()
+        received = False
+        start_wait = rospy.Time.now()
 
-            while not rospy.is_shutdown() and not received:
-                if not _run_event.is_set():
-                    emergency_stop(ser, cmd_pub, tw_stop)
-                    wait_until_running()
-                    start_wait = rospy.Time.now()
-                    continue
-
-                if (rospy.Time.now() - start_wait).to_sec() > WAIT_TIMEOUT:
-                    rospy.logwarn("No reception within timeout; skip spray this cycle.")
-                    break
-
-                value = readline_float_if_sensor(ser)
-                if value is None:
-                    sensor_rate.sleep()
-                    continue
-
-                diff = value - baseline
-                rospy.loginfo("value=%.1f, baseline=%.1f, diff=%.1f", value, baseline, diff)
-
-                if diff >= DIFF_THRESHOLD:
-                    received = True
-                    break
-
-                sensor_rate.sleep()
-
-            if not received:
-                if not sleep_while_running(COOLDOWN_TIME):
-                    emergency_stop(ser, cmd_pub, tw_stop)
-                    wait_until_running()
+        while not rospy.is_shutdown() and not received:
+            if not _run_event.is_set():
+                emergency_stop(ser, cmd_pub, tw_stop)
+                wait_until_running()
+                start_wait = rospy.Time.now()
                 continue
+
+            if (rospy.Time.now() - start_wait).to_sec() > WAIT_TIMEOUT:
+                rospy.logwarn("No reception within timeout; skip spray this cycle.")
+                break
+
+            value = readline_float_if_sensor(ser)
+            if value is None:
+                sensor_rate.sleep()
+                continue
+
+            diff = value - baseline
+            rospy.loginfo("value=%.1f, baseline=%.1f, diff=%.1f", value, baseline, diff)
+
+            if diff >= DIFF_THRESHOLD:
+                received = True
+                break
+
+            sensor_rate.sleep()
+
+        if not received:
+            if not sleep_while_running(COOLDOWN_TIME):
+                emergency_stop(ser, cmd_pub, tw_stop)
+                wait_until_running()
+            continue
 
         # SPRAY (Cycle 1 always sprays; Cycle 2+ sprays only if received)
         rospy.loginfo("Spray ON for %.1f s", SPRAY_TIME)
@@ -267,9 +247,11 @@ def main():
             rate.sleep()
         publish_stop(cmd_pub, tw_stop)
 
-        first_cycle = False
-
-        rospy.sleep(REST_TIME)
+        rospy.loginfo("Rest for %.1f s", REST_TIME)
+        if not sleep_while_running(REST_TIME):
+            emergency_stop(ser, cmd_pub, tw_stop)
+            wait_until_running()
+            continue
 
         # COOLDOWN
         if not sleep_while_running(COOLDOWN_TIME):

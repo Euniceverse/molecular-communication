@@ -5,11 +5,13 @@ import rospy
 import serial
 import threading
 from geometry_msgs.msg import Twist
-from std_msgs.msg import String
+from std_msgs.msg import String, Float32
 
-# -------------------- Params --------------------
 def p(name, default):
     return rospy.get_param("~" + name, default)
+
+def write_cmd(ser, s):
+    ser.write((s if s.endswith("\n") else s + "\n").encode("ascii"))
 
 def readline_float_if_sensor(ser):
     try:
@@ -31,110 +33,169 @@ def wait_for_ready(ser, timeout=5.0):
             return True
     return False
 
-def write_cmd(ser, s):
-    ser.write((s if s.endswith("\n") else s + "\n").encode("ascii"))
-
-# -------------------- START/STOP control --------------------
-_run_event = threading.Event()  # set() = running, clear() = paused/stopped
+_run_event = threading.Event()
 
 def control_cb(msg):
     cmd = msg.data.strip().lower()
     if cmd in ("start", "run", "go"):
         _run_event.set()
-        rospy.loginfo("CONTROL: START")
+        rospy.loginfo("[BACK] CONTROL: START")
     elif cmd in ("stop", "pause"):
         _run_event.clear()
-        rospy.logwarn("CONTROL: STOP")
+        rospy.logwarn("[BACK] CONTROL: STOP")
     else:
-        rospy.logwarn("CONTROL: unknown '%s' (use 'start' or 'stop')", msg.data)
+        rospy.logwarn("[BACK] CONTROL: unknown '%s' (use 'start' or 'stop')", msg.data)
 
 def wait_until_running():
-    rospy.loginfo("Waiting for START... (publish 'start' to control topic)")
+    rospy.loginfo("[BACK] Waiting for START... (publish 'start' to control topic)")
     while not rospy.is_shutdown() and not _run_event.is_set():
         rospy.sleep(0.1)
 
 def sleep_while_running(duration_s):
-    """
-    Sleep up to duration_s but return False early if STOP happens.
-    True  = slept full duration
-    False = stopped/paused during sleep
-    """
     t0 = rospy.Time.now()
     while not rospy.is_shutdown():
         if not _run_event.is_set():
             return False
         if (rospy.Time.now() - t0).to_sec() >= duration_s:
             return True
-        rospy.sleep(0.05)
+        rospy.sleep(0.02)
 
-def publish_stop(cmd_pub, tw_stop, repeats=5):
+def publish_stop(cmd_pub, tw_stop, repeats=8):
     for _ in range(repeats):
         cmd_pub.publish(tw_stop)
         rospy.sleep(0.02)
 
 def emergency_stop(ser, cmd_pub, tw_stop):
-    # spray OFF + robot stop
     try:
         write_cmd(ser, "S0")
     except Exception:
         pass
-    publish_stop(cmd_pub, tw_stop, repeats=8)
+    publish_stop(cmd_pub, tw_stop, repeats=10)
 
-# -------------------- Main --------------------
+def detect_positive_slope(ser, pub_raw, pub_state, t_d, r, rate_hz=20.0, t_out=None, slope_eps=0.0):
+    consecutive = 0
+    start_total = rospy.Time.now()
+    rate = rospy.Rate(rate_hz)
+
+    pub_state.publish(f"STATE=DETECT_START t_d={t_d} r={r} t_out={t_out}")
+
+    while not rospy.is_shutdown():
+        if not _run_event.is_set():
+            pub_state.publish("STATE=DETECT_PAUSED")
+            return None
+
+        if t_out is not None and (rospy.Time.now() - start_total).to_sec() >= float(t_out):
+            pub_state.publish("STATE=DETECT_TIMEOUT")
+            return False
+
+        w0 = rospy.Time.now()
+        first = None
+        last = None
+
+        while not rospy.is_shutdown() and (rospy.Time.now() - w0).to_sec() < float(t_d):
+            if not _run_event.is_set():
+                pub_state.publish("STATE=DETECT_PAUSED")
+                return None
+
+            v = readline_float_if_sensor(ser)
+            if v is not None:
+                pub_raw.publish(Float32(v))
+                if first is None:
+                    first = v
+                last = v
+            rate.sleep()
+
+        ok = (first is not None and last is not None and (last > first + float(slope_eps)))
+
+        if ok:
+            consecutive += 1
+            pub_state.publish(f"EVENT=DETECT_WINDOW_OK cons={consecutive} first={first:.1f} last={last:.1f}")
+        else:
+            consecutive = 0
+            if first is None or last is None:
+                pub_state.publish("EVENT=DETECT_WINDOW_NO_DATA cons=0")
+            else:
+                pub_state.publish(f"EVENT=DETECT_WINDOW_NO cons=0 first={first:.1f} last={last:.1f}")
+
+        if consecutive >= int(r):
+            pub_state.publish("STATE=DETECT_SUCCESS")
+            return True
+
+def do_move(cmd_pub, tw, tw_stop, duration_s, pub_state, label, pub_rate_hz=20.0):
+    pub_state.publish(f"STATE={label} time={duration_s}")
+    t0 = rospy.Time.now()
+    rate = rospy.Rate(pub_rate_hz)
+    while (rospy.Time.now() - t0).to_sec() < duration_s and not rospy.is_shutdown():
+        if not _run_event.is_set():
+            break
+        cmd_pub.publish(tw)
+        rate.sleep()
+    publish_stop(cmd_pub, tw_stop)
+    pub_state.publish(f"STATE={label}_DONE")
+
 def main():
-    rospy.init_node("molecular_demo_tx")
+    rospy.init_node("vertical_back")
 
-    # Arduino / sensing params
-    PORT              = p("port", "/dev/ttyUSB0")
-    BAUD              = int(p("baud", 57600))
-    DIFF_THRESHOLD    = float(p("diff_threshold", 300.0))
-    BASELINE_ALPHA    = float(p("baseline_alpha", 0.05))
-    SPRAY_TIME        = float(p("spray_time", 5.0))
-    COOLDOWN_TIME     = float(p("cooldown_time", 5.0))
-    WAIT_TIMEOUT      = float(p("wait_timeout", 40.0))
-    PRIME_BASELINE_S  = float(p("prime_baseline_sec", 3.0))
-    USE_READY         = bool(p("use_ready", False))
+    ROLE = "back"
 
-    # Motion params
-    CMD_TOPIC         = p("cmd_vel_topic", "/cmd_vel")
-    SPEED_LIN         = float(p("speed_linear", -0.04))
-    SPEED_ANG         = float(p("speed_angular", 0.0))
-    MOVE_TIME         = float(p("move_time", 2.0))
-    PUB_RATE_HZ       = float(p("publish_rate", 20.0))
+    CONTROL_TOPIC = p("control_topic", "/molecular_demo/control")
+    RAW_TOPIC     = p("raw_topic",     f"/molecular/{ROLE}/raw")
+    STATE_TOPIC   = p("state_topic",   f"/molecular/{ROLE}/state")
+    CMD_TOPIC     = p("cmd_vel_topic", "/cmd_vel")
 
-    # Rest time 
-    REST_TIME         = float(p("rest_time", 5.0))
+    PORT      = p("port", "/dev/ttyUSB0")
+    BAUD      = int(p("baud", 57600))
+    USE_READY = bool(p("use_ready", False))
 
-    # Control topic
-    CONTROL_TOPIC     = p("control_topic", "/molecular_demo/control")
-    rospy.Subscriber(CONTROL_TOPIC, String, control_cb, queue_size=1)
-    rospy.loginfo("Control topic: %s  (send 'start' or 'stop')", CONTROL_TOPIC)
+    # R2 flow: DETECT1 -> SPRAY -> MOVE -> DETECT2(timeout) -> (timeout이면 BACKOFF) -> repeat
+    SPRAY_TIME = float(p("spray_time", 5.0))
 
-    # Start in STOP state (important)
-    _run_event.clear()
+    # Detect params
+    TD1       = float(p("t_d1", 2.0))
+    R1REQ     = int(p("r1", 3))
+    TD2       = float(p("t_d2", 2.0))
+    R2REQ     = int(p("r2", 3))
+    TOUT2     = float(p("t_out2", 40.0))
+    RATE_HZ   = float(p("sense_rate", 20.0))
+    SLOPE_EPS = float(p("slope_eps", 0.0))
 
-    # Publisher
-    cmd_pub = rospy.Publisher(CMD_TOPIC, Twist, queue_size=1)
+    # Motion
+    SPEED_LIN       = float(p("speed_linear", 0.05))
+    SPEED_ANG       = float(p("speed_angular", 0.0))
+    MOVE_TIME       = float(p("move_time", 2.0))
+    SPEED_LIN_BACK  = float(p("speed_linear_back", -0.05))
+    BACK_TIME       = float(p("back_time", 2.0))
+    PUB_RATE_HZ     = float(p("publish_rate", 20.0))
 
-    # Prebuilt Twist messages
+    rospy.Subscriber(CONTROL_TOPIC, String, control_cb, queue_size=10)
+    pub_raw   = rospy.Publisher(RAW_TOPIC, Float32, queue_size=1000)
+    pub_state = rospy.Publisher(STATE_TOPIC, String, queue_size=1000)
+    cmd_pub   = rospy.Publisher(CMD_TOPIC, Twist, queue_size=10)
+
+    rospy.loginfo("[BACK] Control topic: %s  (send 'start' or 'stop')", CONTROL_TOPIC)
+    pub_state.publish("STATE=BOOT")
+
     tw_go = Twist()
     tw_go.linear.x = SPEED_LIN
     tw_go.angular.z = SPEED_ANG
+
+    tw_back = Twist()
+    tw_back.linear.x = SPEED_LIN_BACK
+    tw_back.angular.z = 0.0
+
     tw_stop = Twist()
 
-    # Wait for START before touching hardware (optional but usually what you want)
+    _run_event.clear()
     wait_until_running()
 
-    rospy.loginfo("Opening serial %s @ %d ...", PORT, BAUD)
+    pub_state.publish(f"STATE=SERIAL_OPEN port={PORT} baud={BAUD}")
     ser = serial.Serial(PORT, BAUD, timeout=1.0)
-
-    # Ensure we stop safely on shutdown
     rospy.on_shutdown(lambda: emergency_stop(ser, cmd_pub, tw_stop))
 
-    rospy.loginfo("Waiting for Arduino reboot/handshake...")
+    pub_state.publish("STATE=ARDUINO_HANDSHAKE")
     if USE_READY:
         if not wait_for_ready(ser, 5.0):
-            rospy.logwarn("No 'READY' seen, falling back to fixed delay")
+            pub_state.publish("EVENT=NO_READY_FALLBACK_DELAY")
             rospy.sleep(2.5)
     else:
         rospy.sleep(2.5)
@@ -144,132 +205,59 @@ def main():
     except Exception:
         pass
 
-    # Prime relay
+    pub_state.publish("STATE=PRIME_RELAY")
     write_cmd(ser, "S0"); rospy.sleep(0.2)
     write_cmd(ser, "S1"); rospy.sleep(0.2)
-    write_cmd(ser, "S0"); rospy.loginfo("Arduino primed.")
-
-    # Prime baseline
-    baseline = None
-    if PRIME_BASELINE_S > 0.0:
-        rospy.loginfo("Priming baseline for %.1f s ...", PRIME_BASELINE_S)
-        t0 = rospy.Time.now()
-        while (rospy.Time.now() - t0).to_sec() < PRIME_BASELINE_S and not rospy.is_shutdown():
-            if not _run_event.is_set():
-                emergency_stop(ser, cmd_pub, tw_stop)
-                wait_until_running()
-                t0 = rospy.Time.now()
-                continue
-
-            val = readline_float_if_sensor(ser)
-            if val is not None:
-                baseline = val if baseline is None else (1.0 - BASELINE_ALPHA) * baseline + BASELINE_ALPHA * val
-
-        if baseline is not None:
-            rospy.loginfo("Initial baseline: %.2f", baseline)
-
-    sensor_rate = rospy.Rate(20)
-
-    rospy.loginfo("Running cycles. (Send 'stop' anytime to pause)")
+    write_cmd(ser, "S0"); rospy.sleep(0.2)
+    pub_state.publish("STATE=PRIMED")
 
     while not rospy.is_shutdown():
-        # If stopped, ensure safe state and wait
         if not _run_event.is_set():
+            pub_state.publish("STATE=PAUSED")
             emergency_stop(ser, cmd_pub, tw_stop)
             wait_until_running()
+            pub_state.publish("STATE=RESUMED")
             continue
 
-        try:
-            ser.reset_input_buffer()
-        except Exception:
-            pass
-
-        rospy.sleep(PRIME_BASELINE_S)
-
-        # 2) WAIT FOR RECEPTION
-        received = False
-        start_wait = rospy.Time.now()
-
-        while not rospy.is_shutdown() and not received:
-            if not _run_event.is_set():
-                emergency_stop(ser, cmd_pub, tw_stop)
-                wait_until_running()
-                start_wait = rospy.Time.now()  # reset timeout after resume
-                continue
-
-            if (rospy.Time.now() - start_wait).to_sec() > WAIT_TIMEOUT:
-                rospy.logwarn("No reception within timeout; next cycle.")
-                break
-
-            value = readline_float_if_sensor(ser)
-            if value is None:
-                sensor_rate.sleep()
-                continue
-
-            if baseline is None:
-                baseline = value
-            else:
-                baseline = (1.0 - BASELINE_ALPHA) * baseline + BASELINE_ALPHA * value
-
-            diff = value - baseline
-            rospy.loginfo("value=%.1f, baseline=%.1f, diff=%.1f", value, baseline, diff)
-
-            if diff >= DIFF_THRESHOLD:
-                received = True
-                break
-
-            sensor_rate.sleep()
-
-
-        # 3) MOVE
-        if received:
-            rospy.loginfo(">>> GAS RECEIVED: moving for %.1f s on %s", MOVE_TIME, CMD_TOPIC)
-            t0 = rospy.Time.now()
-            rate = rospy.Rate(PUB_RATE_HZ)
-
-            while (rospy.Time.now() - t0).to_sec() < MOVE_TIME and not rospy.is_shutdown():
-                if not _run_event.is_set():
-                    break
-                cmd_pub.publish(tw_go)
-                rate.sleep()
-
-            publish_stop(cmd_pub, tw_stop, repeats=8)
-            rospy.loginfo("Move done.")
-
-            rospy.sleep(REST_TIME)
-        else:
-            rospy.loginfo("Cycle ended without reception")
-
-        if not received:
-            rospy.loginfo("No reception -> do NOT spray. Cooldown and retry.")
-            if not sleep_while_running(COOLDOWN_TIME):
-                emergency_stop(ser, cmd_pub, tw_stop)
-                wait_until_running()
+        # DETECT1 (timeout 없이 기다리는 단계)
+        pub_state.publish("STATE=DETECT1")
+        res1 = detect_positive_slope(
+            ser=ser, pub_raw=pub_raw, pub_state=pub_state,
+            t_d=TD1, r=R1REQ, rate_hz=RATE_HZ, t_out=None, slope_eps=SLOPE_EPS
+        )
+        if res1 is None:
             continue
+        # res1은 timeout 없음이라 보통 True
 
-        # 1) SPRAY ON
-        spray_for = SPRAY_TIME
-
-        rospy.loginfo("=== NEW CYCLE ===")
-        rospy.loginfo("Spray ON for %.1f s", spray_for)
-
+        # SPRAY
+        pub_state.publish(f"STATE=SPRAY_ON t_s={SPRAY_TIME}")
         write_cmd(ser, "S1")
-        finished = sleep_while_running(spray_for)   # STOP can interrupt here
+        ok = sleep_while_running(SPRAY_TIME)
         write_cmd(ser, "S0")
-
-        if not finished:
-            emergency_stop(ser, cmd_pub, tw_stop)
-            wait_until_running()
+        pub_state.publish("STATE=SPRAY_OFF")
+        if not ok:
             continue
 
-        rospy.loginfo("Spray OFF, waiting (timeout=%.1f s)", WAIT_TIMEOUT)
+        # MOVE
+        do_move(cmd_pub, tw_go, tw_stop, MOVE_TIME, pub_state, "MOVE", pub_rate_hz=PUB_RATE_HZ)
 
-
-        # 4) COOLDOWN (STOP can pause here too)
-        if not sleep_while_running(COOLDOWN_TIME):
-            emergency_stop(ser, cmd_pub, tw_stop)
-            wait_until_running()
+        # DETECT2 (timeout 있음)
+        pub_state.publish("STATE=DETECT2")
+        res2 = detect_positive_slope(
+            ser=ser, pub_raw=pub_raw, pub_state=pub_state,
+            t_d=TD2, r=R2REQ, rate_hz=RATE_HZ, t_out=TOUT2, slope_eps=SLOPE_EPS
+        )
+        if res2 is None:
             continue
+
+        if res2 is True:
+            pub_state.publish("STATE=ROUND_SUCCESS_NEXT")
+            continue
+
+        # timeout -> BACKOFF(후진) 후 DETECT1로
+        pub_state.publish("STATE=DETECT2_FAIL_BACKOFF")
+        do_move(cmd_pub, tw_back, tw_stop, BACK_TIME, pub_state, "BACKOFF", pub_rate_hz=PUB_RATE_HZ)
+        pub_state.publish("STATE=BACK_TO_DETECT1")
 
 if __name__ == "__main__":
     try:

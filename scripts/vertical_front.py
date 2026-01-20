@@ -268,6 +268,11 @@ def main():
         publish_stop(cmd_pub, tw_stop)
         pub_state.publish("STATE=MOVE_DONE")
 
+        # 2) WAIT
+        pub_state.publish(f"STATE=WAIT t_w={WAIT_TIME}")
+        if not sleep_while_running(WAIT_TIME):
+            continue
+
         # loop repeats
 
 if __name__ == "__main__":

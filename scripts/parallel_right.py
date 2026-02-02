@@ -301,21 +301,21 @@ def main():
     rospy.loginfo("Calibration done. threshold=%.1f", threshold)
 
     for i in range(CAL_SPRAY_NUM):
-            rospy.loginfo("Calibration spray %d/%d", i+1, CAL_SPRAY_NUM)
-            if rospy.is_shutdown():
-                return
-            if not _run_event.is_set():
-                handle_pause(ser, cmd_pub, tw_stop, pub_state)
-            pub_state.publish(f"STATE=CAL_SPRAY i={i+1}/{CAL_SPRAY_NUM}")
-            ok = spray_step(ser, CAL_SPRAY_TIME, pub_state=pub_state)
-            if not ok:
-                continue
-            rospy.loginfo("Calibration wait for %.1f", CAL_WAIT_TIME)
-            pub_state.publish(f"STATE=CAL_WAIT t={CAL_WAIT_TIME}")
-            if not sleep_while_running(CAL_WAIT_TIME, pub_state=pub_state):
-                continue
+        rospy.loginfo("Calibration spray %d/%d", i+1, CAL_SPRAY_NUM)
+        if rospy.is_shutdown():
+            return
+        if not _run_event.is_set():
+            handle_pause(ser, cmd_pub, tw_stop, pub_state)
+        pub_state.publish(f"STATE=CAL_SPRAY i={i+1}/{CAL_SPRAY_NUM}")
+        ok = spray_step(ser, CAL_SPRAY_TIME, pub_state=pub_state)
+        if not ok:
+            continue
+        rospy.loginfo("Calibration wait for %.1f", CAL_WAIT_TIME)
+        pub_state.publish(f"STATE=CAL_WAIT t={CAL_WAIT_TIME}")
+        if not sleep_while_running(CAL_WAIT_TIME, pub_state=pub_state):
+            continue
 
-        rospy.loginfo("Calibration done.")
+    rospy.loginfo("Calibration done.")
 
     # -------------------- MAIN LOOP --------------------
     pub_state.publish("STATE=MAIN_LOOP")

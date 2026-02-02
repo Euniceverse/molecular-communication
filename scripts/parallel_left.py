@@ -276,6 +276,7 @@ def main():
         if not ok:
             continue
         pub_state.publish(f"STATE=CAL_WAIT t={CAL_WAIT_TIME}")
+        rospy.loginfo("Calibration wait for %d" ,CAL_WAIT_TIME)
         if not sleep_while_running(CAL_WAIT_TIME, pub_state=pub_state):
             continue
 

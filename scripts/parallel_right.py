@@ -149,7 +149,6 @@ def find_max_for(ser, duration_s, pub_raw=None, sense_rate_hz=20.0):
 def detect_threshold_for(ser, duration_s, threshold, pub_raw=None, sense_rate_hz=20.0):
     rospy.loginfo("start detection for %.1f sec, threshold=%.1f", float(duration_s), float(threshold))
     t0 = rospy.Time.now()
-    t0 = rospy.Time.now()
     is_threshold_exceeded = False
     rate = rospy.Rate(float(sense_rate_hz)) 
 

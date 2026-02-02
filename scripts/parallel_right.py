@@ -147,7 +147,7 @@ def find_max_for(ser, duration_s, pub_raw=None, sense_rate_hz=20.0):
 
 
 def detect_threshold_for(ser, duration_s, threshold, pub_raw=None, sense_rate_hz=20.0):
-    rospy.loginfo("start detection for %d if %d", duration_s, threshold)
+    rospy.loginfo("start detection for %.1f sec, threshold=%.1f", float(duration_s), float(threshold))    t0 = rospy.Time.now()
     t0 = rospy.Time.now()
     is_threshold_exceeded = False
     rate = rospy.Rate(float(sense_rate_hz)) 
@@ -162,7 +162,7 @@ def detect_threshold_for(ser, duration_s, threshold, pub_raw=None, sense_rate_hz
                 pub_raw.publish(Float32(v))
             if v > float(threshold):
                 is_threshold_exceeded = True
-                rospy.loginfo("found: %d", v)
+                rospy.loginfo("found: %.1f", float(v))
         rate.sleep()   
     return is_threshold_exceeded
 
@@ -298,7 +298,7 @@ def main():
             f"STATE=THRESH_OK avg_max={avg_max:.1f} factor={THRESH_FACTOR:.2f} thr={threshold:.1f}"
         )
 
-    rospy.loginfo("Done. threshold=%.1f", threshold)
+    rospy.loginfo("Calibration done. threshold=%.1f", threshold)
 
     for i in range(CAL_SPRAY_NUM):
             rospy.loginfo("Calibration spray %d/%d", i+1, CAL_SPRAY_NUM)
@@ -310,7 +310,7 @@ def main():
             ok = spray_step(ser, CAL_SPRAY_TIME, pub_state=pub_state)
             if not ok:
                 continue
-            rospy.loginfo("Calibration wait for %d" ,CAL_WAIT_TIME)
+            rospy.loginfo("Calibration wait for %.1f", CAL_WAIT_TIME)
             pub_state.publish(f"STATE=CAL_WAIT t={CAL_WAIT_TIME}")
             if not sleep_while_running(CAL_WAIT_TIME, pub_state=pub_state):
                 continue
@@ -357,7 +357,7 @@ def main():
             if not ok:
                 break
 
-            rospy.loginfo("Wait for %d", MAIN_WAIT_TIME)
+            rospy.loginfo("Wait for %.1f", MAIN_WAIT_TIME)
             pub_state.publish(f"STATE=MAIN_WAIT t={MAIN_WAIT_TIME}")
             if not sleep_while_running(MAIN_WAIT_TIME, pub_state=pub_state):
                 break

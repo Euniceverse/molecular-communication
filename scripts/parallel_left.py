@@ -361,8 +361,10 @@ def main():
 
         # 3) Move if detected
         if res is True:
+            rospy.loginfo("GAS RECEIVED -> MOVE")
             move_step(cmd_pub, tw_go, tw_stop, MOVE_TIME, PUB_RATE_HZ, pub_state=pub_state)
         else:
+            rospy.loginfo("GAS NOT RECEIVED -> NO MOVE")
             pub_state.publish("STATE=NO_RECEPTION")
 
 if __name__ == "__main__":

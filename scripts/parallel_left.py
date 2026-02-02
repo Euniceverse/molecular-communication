@@ -275,8 +275,8 @@ def main():
         ok = spray_step(ser, CAL_SPRAY_TIME, pub_state=pub_state)
         if not ok:
             continue
-        pub_state.publish(f"STATE=CAL_WAIT t={CAL_WAIT_TIME}")
         rospy.loginfo("Calibration wait for %d" ,CAL_WAIT_TIME)
+        pub_state.publish(f"STATE=CAL_WAIT t={CAL_WAIT_TIME}")
         if not sleep_while_running(CAL_WAIT_TIME, pub_state=pub_state):
             continue
 
@@ -339,6 +339,7 @@ def main():
             if not ok:
                 break
 
+            rospy.loginfo("Wait for %d", MAIN_WAIT_TIME)
             pub_state.publish(f"STATE=MAIN_WAIT t={MAIN_WAIT_TIME}")
             if not sleep_while_running(MAIN_WAIT_TIME, pub_state=pub_state):
                 break

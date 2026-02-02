@@ -147,6 +147,7 @@ def find_max_for(ser, duration_s, pub_raw=None, sense_rate_hz=20.0):
 
 
 def detect_threshold_for(ser, duration_s, threshold, pub_raw=None, sense_rate_hz=20.0):
+    rospy.loginfo("start detection for %d if %d", duration_s, threshold)
     t0 = rospy.Time.now()
     is_threshold_exceeded = False
     rate = rospy.Rate(float(sense_rate_hz)) 
@@ -161,7 +162,7 @@ def detect_threshold_for(ser, duration_s, threshold, pub_raw=None, sense_rate_hz
                 pub_raw.publish(Float32(v))
             if v > float(threshold):
                 is_threshold_exceeded = True
-
+                rospy.loginfo("found: %d", v)
         rate.sleep()   
     return is_threshold_exceeded
 
@@ -278,9 +279,12 @@ def main():
         if not sleep_while_running(CAL_WAIT_TIME, pub_state=pub_state):
             continue
 
+    rospy.loginfo("Done")
+
     # Find max values several times
     max_values = []
     for j in range(FIND_MAX_NUM):
+        rospy.loginfo("Calibration find peak %d/%d", j+1, FIND_MAX_NUM)
         if rospy.is_shutdown():
             return
         if not _run_event.is_set():
@@ -297,6 +301,8 @@ def main():
             pub_state.publish(f"EVENT=FIND_MAX_OK value={mx:.1f}")
             max_values.append(mx)
 
+    rospy.loginfo("Done")
+
     # Calculate threshold
     if len(max_values) == 0:
         threshold = THRESH_FALLBACK
@@ -312,6 +318,8 @@ def main():
 
     # -------------------- MAIN LOOP --------------------
     pub_state.publish("STATE=MAIN_LOOP")
+    rospy.loginfo("Start Main loop")
+
     while not rospy.is_shutdown():
         if not _run_event.is_set():
             handle_pause(ser, cmd_pub, tw_stop, pub_state)
@@ -319,6 +327,7 @@ def main():
 
         # 1) Spray N times
         for k in range(MAIN_SPRAY_NUM):
+            rospy.loginfo("Spary %d/%d", k+1, MAIN_SPRAY_NUM)
             if rospy.is_shutdown():
                 break
             if not _run_event.is_set():
@@ -337,6 +346,8 @@ def main():
             break
         if not _run_event.is_set():
             continue
+
+        rospy.loginfo("Done")
 
         # 2) Detect above threshold
         pub_state.publish(f"STATE=DETECT thr={threshold:.1f} t={DETECT_TIME_MAIN}")

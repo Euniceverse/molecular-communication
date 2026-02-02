@@ -198,20 +198,20 @@ def main():
 
     # Calibration params
     CAL_SPRAY_NUM   = int(p("cal_spray_num", 3))
-    CAL_SPRAY_TIME  = float(p("cal_spray_time", 5.0))
-    CAL_WAIT_TIME   = float(p("cal_wait_time", 2.0))
+    CAL_SPRAY_TIME  = float(p("cal_spray_time", 10.0))
+    CAL_WAIT_TIME   = float(p("cal_wait_time", 290.0))
     FIND_MAX_NUM    = int(p("find_max_num", 3))
-    DETECT_TIME_CAL = float(p("detect_time_cal", 30.0))
+    DETECT_TIME_CAL = float(p("detect_time_cal", 300.0))
     THRESH_FACTOR   = float(p("threshold_factor", 0.5))   # avg_max * factor
     THRESH_FALLBACK = float(p("threshold_fallback", 300.0))
 
 
     # Main loop params
     MAIN_SPRAY_NUM    = int(p("main_spray_num", 1))
-    MAIN_SPRAY_TIME   = float(p("spray_time", 5.0))
-    MAIN_WAIT_TIME    = float(p("wait_time", 2.0))
-    DETECT_TIME_MAIN  = float(p("detect_time_main", 10.0))
-    COOLDOWN_TIME     = float(p("cooldown_time", 1.0))
+    MAIN_SPRAY_TIME   = float(p("spray_time", 10.0))
+    MAIN_WAIT_TIME    = float(p("wait_time", 290.0))
+    DETECT_TIME_MAIN  = float(p("detect_time_main", 300.0))
+    COOLDOWN_TIME     = float(p("cooldown_time", 0.0))
 
     # Motion params
     CMD_TOPIC   = p("cmd_vel_topic", "/cmd_vel")
@@ -265,6 +265,7 @@ def main():
     pub_state.publish("STATE=CALIBRATE_BEGIN")
 
     for i in range(CAL_SPRAY_NUM):
+        rospy.loginfo("Calibration spray %d/%d", i+1, CAL_SPRAY_NUM)
         if rospy.is_shutdown():
             return
         if not _run_event.is_set():

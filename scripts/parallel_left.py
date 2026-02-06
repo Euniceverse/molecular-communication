@@ -233,22 +233,19 @@ def baseline_avg_for(sampler: SerialSampler, duration_s, pub_state=None, sense_r
         return None, "NO_DATA"
     return (s / n), "OK"
 
-
 def find_min_with_tail_baseline_avg(
     sampler: SerialSampler,
     duration_s,
     tail_s=20.0,
     pub_state=None,
-    sense_rate_hz=10.0
+    sense_rate_hz=10.0,
+    baseline=None,
 ):
-    """
-    Over duration_s:
-      - peak (for drop sensor) = minimum value
-      - tail baseline avg = avg of values in last tail_s seconds of the window
-    Returns (min_v, tail_avg, status) where status in {"OK","PAUSED","NO_DATA"}
-    """
     if pub_state:
         pub_state.publish(f"STATE=FIND_MIN t={float(duration_s):.1f} tail={float(tail_s):.1f}")
+
+    if baseline is None:
+        return None, None, None, "NO_BASELINE"
 
     start_seq, _, _ = sampler.snapshot()
     min_v = None
@@ -261,7 +258,7 @@ def find_min_with_tail_baseline_avg(
 
     while not rospy.is_shutdown():
         if not _run_event.is_set():
-            return None, None, "PAUSED"
+            return None, None, None, "PAUSED"
 
         elapsed = (rospy.Time.now() - t0).to_sec()
         if elapsed >= float(duration_s):
@@ -281,11 +278,13 @@ def find_min_with_tail_baseline_avg(
         rate.sleep()
 
     if min_v is None:
-        return None, None, "NO_DATA"
+        return None, None, None, "NO_DATA"
+
+    drop = float(baseline) - float(min_v)
+    threshold = max(0.0, drop) 
 
     tail_avg = (tail_sum / tail_n) if tail_n > 0 else None
-    return min_v, tail_avg, "OK"
-
+    return threshold, min_v, tail_avg, "OK"
 
 def detect_drop_for(
     sampler: SerialSampler,
@@ -462,32 +461,53 @@ def main():
     rospy.loginfo("[Baseline] Set as %.1f", float(baseline0))
 
     # Find peak (lowest) for 300s + tail baseline avg over last 20s
-    rospy.loginfo("[Find peak] 300s / [Find baseline] last 20s of 300s")
-    flush_input(ser)
-    min_v, tail_avg, st = find_min_with_tail_baseline_avg(
-        sampler, PEAK_300, tail_s=TAIL_20, pub_state=pub_state, sense_rate_hz=SAMPLE_HZ
-    )
+    thresholds = []
+    min_values = []
+    tail_avgs = []
 
-    rospy.loginfo("[Find peak] Done")
+    for i in range(3):
+        rospy.loginfo("[Find peak] 300s / [Find baseline] last 20s of 300s")
+        flush_input(ser)
 
-    if st != "OK" or min_v is None or baseline0 is None:
+        threshold, min_v, tail_avg, st = find_min_with_tail_baseline_avg(
+            sampler,
+            PEAK_300,
+            tail_s=TAIL_20,
+            pub_state=pub_state,
+            sense_rate_hz=SAMPLE_HZ,
+            baseline=baseline0
+        )
+
+        rospy.loginfo(
+            "[Find peak %d] st=%s threshold=%.1f min_v=%.1f tail_avg=%.1f",
+            i+1,
+            st,
+            float(threshold) if threshold is not None else float('nan'),
+            float(min_v) if min_v is not None else float('nan'),
+            float(tail_avg) if tail_avg is not None else float('nan'),
+        )
+
+        if st == "OK" and threshold is not None:
+            thresholds.append(float(threshold))
+            min_values.append(float(min_v))
+            if tail_avg is not None:
+                tail_avgs.append(float(tail_avg))
+
+    # Decide drop_threshold
+    if baseline0 is None or len(thresholds) == 0:
         drop_threshold = DROP_THR_FALLBACK
         pub_state.publish(f"STATE=DROP_THR_FALLBACK dthr={drop_threshold:.1f} reason=NO_DATA")
     else:
-        # Your rule: (baseline - peak_avg) * 0.5
-        peak_avg = float(min_v)  # single-window "peak_avg" (lowest)
-        raw_drop = float(baseline0) - float(peak_avg)
-        drop_threshold = max(0.0, raw_drop * float(THRESH_FACTOR))
+        threshold_avg = sum(thresholds) / float(len(thresholds))   # avg drop (baseline - min)
+        drop_threshold = threshold_avg * float(THRESH_FACTOR)      # your 0.5 factor
 
-        pub_state.publish(f"EVENT=PEAK_MIN_OK value={float(min_v):.1f}")
-        if tail_avg is not None:
-            pub_state.publish(f"EVENT=TAIL_BASELINE_AVG value={float(tail_avg):.1f}")
+        avg_min = sum(min_values) / float(len(min_values))
 
         pub_state.publish(
-            f"STATE=DROP_THR_OK baseline0={float(baseline0):.1f} peak_avg={float(peak_avg):.1f} "
+            f"STATE=DROP_THR_OK baseline0={float(baseline0):.1f} "
+            f"avg_min={avg_min:.1f} avg_drop={threshold_avg:.1f} "
             f"factor={float(THRESH_FACTOR):.2f} dthr={float(drop_threshold):.1f}"
         )
-
     rospy.loginfo("[Find threshold] threshold=%.1f", float(drop_threshold))
 
     # Wait 20s
@@ -536,6 +556,8 @@ def main():
             pub_state.publish(f"EVENT=BASELINE_FAIL status={st}")
             continue
         pub_state.publish(f"EVENT=BASELINE_OK value={baseline:.1f}")
+        rospy.loginfo("[Baseline] Set as %.1f", float(baseline0))
+
 
         # 2) Detect for 300s: exists v where (baseline - v) > drop_threshold
         rospy.loginfo("[Detect] 300s")

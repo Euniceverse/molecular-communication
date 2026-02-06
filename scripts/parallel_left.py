@@ -304,6 +304,7 @@ def detect_drop_for(
       False = not detected
       None  = paused/stopped during detection
     """
+    result = False
     if pub_state:
         pub_state.publish(
             f"STATE=DETECT_DROP t={float(duration_s):.1f} baseline={float(baseline):.1f} dthr={float(drop_threshold):.1f}"
@@ -322,15 +323,14 @@ def detect_drop_for(
             start_seq = seq
 
             drop = float(baseline) - float(v)
-            if drop > float(drop_threshold):
+            if drop > float(drop_threshold) and result is False:
                 if pub_state:
                     pub_state.publish(f"EVENT=DROP_FOUND v={float(v):.1f} drop={drop:.1f}")
                 rospy.loginfo("DROP_FOUND: v=%.1f drop=%.1f", float(v), float(drop))
-                return True
-
+                result = True
         rate.sleep()
 
-    return False
+    return result
 
 
 def move_step(cmd_pub, tw_go, tw_stop, move_time, pub_rate_hz, pub_state=None):

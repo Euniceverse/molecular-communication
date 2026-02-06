@@ -440,14 +440,18 @@ def main():
     sampler.start()
 
     # -------------------- CALIBRATION (once) --------------------
+    rospy.loginfo("[[Start Calibration]]")
     pub_state.publish("STATE=CAL_BEGIN")
 
     # Wait 80s
+    rospy.loginfo("[Wait] 80s")
     pub_state.publish(f"STATE=WAIT_80 t={WAIT_80:.1f}")
     if not sleep_while_running(WAIT_80, pub_state=pub_state):
         handle_pause(ser, cmd_pub, tw_stop, pub_state)
+    rospy.loginfo("[Wait] Done")
 
     # Baseline avg 20s
+    rospy.loginfo("[Baseline] 20s")
     flush_input(ser)
     baseline0, st = baseline_avg_for(sampler, BASELINE_20_CAL, pub_state=pub_state, sense_rate_hz=SAMPLE_HZ)
     if st != "OK" or baseline0 is None:
@@ -455,12 +459,16 @@ def main():
         baseline0 = None
     else:
         pub_state.publish(f"EVENT=BASELINE0_OK value={baseline0:.1f}")
+    rospy.loginfo("[Baseline] Set as %.1f", float(baseline0))
 
     # Find peak (lowest) for 300s + tail baseline avg over last 20s
+    rospy.loginfo("[Find peak] 300s / [Find baseline] last 20s of 300s")
     flush_input(ser)
     min_v, tail_avg, st = find_min_with_tail_baseline_avg(
         sampler, PEAK_300, tail_s=TAIL_20, pub_state=pub_state, sense_rate_hz=SAMPLE_HZ
     )
+
+    rospy.loginfo("[Find peak] Done")
 
     if st != "OK" or min_v is None or baseline0 is None:
         drop_threshold = DROP_THR_FALLBACK
@@ -480,14 +488,17 @@ def main():
             f"factor={float(THRESH_FACTOR):.2f} dthr={float(drop_threshold):.1f}"
         )
 
-    rospy.loginfo("Calibration done. drop_threshold=%.1f", float(drop_threshold))
+    rospy.loginfo("[Find threshold] threshold=%.1f", float(drop_threshold))
 
     # Wait 20s
+    rospy.loginfo("[Wait] 20s")
     pub_state.publish(f"STATE=WAIT_20_AFTER_THRESH t={WAIT_20_AFTER_THRESH:.1f}")
     if not sleep_while_running(WAIT_20_AFTER_THRESH, pub_state=pub_state):
         handle_pause(ser, cmd_pub, tw_stop, pub_state)
+    rospy.loginfo("[Wait] Done")
 
     # Spray 10s once + wait 290s, repeat 3 times
+    rospy.loginfo("[Spray] 10s, [Wait] 290s: repeat 3 times")
     pub_state.publish(f"STATE=CAL_SPRAY_SET repeats={CAL_SET_REPEATS}")
     for i in range(int(CAL_SET_REPEATS)):
         if rospy.is_shutdown():
@@ -496,13 +507,16 @@ def main():
             handle_pause(ser, cmd_pub, tw_stop, pub_state)
 
         pub_state.publish(f"STATE=CAL_SET_SPRAY i={i+1}/{CAL_SET_REPEATS}")
+        rospy.loginfo("[Spray] 10s")
         if not spray_step(ser, CAL_SPRAY_10, pub_state=pub_state):
             continue
 
+        rospy.loginfo("[Wait] 290s")
         pub_state.publish(f"STATE=CAL_SET_WAIT t={CAL_WAIT_290:.1f}")
         if not sleep_while_running(CAL_WAIT_290, pub_state=pub_state):
             continue
 
+    rospy.loginfo("[[Calibration Done]]")
     pub_state.publish("STATE=CAL_DONE")
 
     # -------------------- MAIN LOOP --------------------
@@ -515,6 +529,7 @@ def main():
             continue
 
         # 1) Baseline avg 20s
+        rospy.loginfo("[Baseline] 20s")
         flush_input(ser)
         baseline, st = baseline_avg_for(sampler, BASELINE_20_MAIN, pub_state=pub_state, sense_rate_hz=SAMPLE_HZ)
         if st != "OK" or baseline is None:
@@ -523,6 +538,7 @@ def main():
         pub_state.publish(f"EVENT=BASELINE_OK value={baseline:.1f}")
 
         # 2) Detect for 300s: exists v where (baseline - v) > drop_threshold
+        rospy.loginfo("[Detect] 300s")
         flush_input(ser)
         res = detect_drop_for(
             sampler, DETECT_300_MAIN,
@@ -535,25 +551,31 @@ def main():
             # paused
             continue
         pub_state.publish(f"EVENT=DETECT_RESULT detected={res}")
+        rospy.loginfo("[Detect] Done.")
 
         # 3) Wait 20s
+        rospy.loginfo("[Wait] 20s")
         pub_state.publish(f"STATE=WAIT_20_BEFORE_ACTION t={WAIT_20_BEFORE_ACTION:.1f}")
         if not sleep_while_running(WAIT_20_BEFORE_ACTION, pub_state=pub_state):
             continue
+        rospy.loginfo("[Wait] Done")
 
         # 4) If detected: spray 10s + wait 290s, then move; else go back to baseline
         if res:
             pub_state.publish("STATE=ACTION_DETECTED")
-
+            
+            rospy.loginfo("[Spray] 10s, Detected")
             # Spray
             if not spray_step(ser, ACTION_SPRAY_10, pub_state=pub_state):
                 continue
-
+            
+            rospy.loginfo("[Wait] 290s")
             # Wait
             pub_state.publish(f"STATE=ACTION_WAIT t={ACTION_WAIT_290:.1f}")
             if not sleep_while_running(ACTION_WAIT_290, pub_state=pub_state):
                 continue
 
+            rospy.loginfo("[Move] %.1f seconds", MOVE_TIME)
             # Move
             move_step(cmd_pub, tw_go, tw_stop, MOVE_TIME, PUB_RATE_HZ, pub_state=pub_state)
 

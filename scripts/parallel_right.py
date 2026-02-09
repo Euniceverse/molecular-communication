@@ -529,6 +529,9 @@ def main():
             if tail_avg is not None:
                 tail_avgs.append(float(tail_avg))
 
+        baseline0=tail_avg
+
+
     if baseline0 is None or len(thresholds) == 0:
         drop_threshold = DROP_THR_FALLBACK
         pub_state.publish(f"STATE=DROP_THR_FALLBACK dthr={drop_threshold:.1f} reason=NO_DATA")

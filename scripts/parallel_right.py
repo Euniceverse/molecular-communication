@@ -307,6 +307,8 @@ def detect_drop_for(
     Debounced detect: require hits_required samples where (baseline - v) > drop_threshold.
     Returns: True / False / None (paused)
     """
+    result = False
+
     if pub_state:
         pub_state.publish(
             f"STATE=DETECT_DROP t={float(duration_s):.1f} baseline={float(baseline):.1f} dthr={float(drop_threshold):.1f}"
@@ -330,13 +332,13 @@ def detect_drop_for(
                     if pub_state:
                         pub_state.publish(f"EVENT=DROP_FOUND v={float(v):.1f} drop={drop:.1f} hits={hits}")
                     rospy.loginfo("DROP_FOUND: v=%.1f drop=%.1f hits=%d", float(v), float(drop), hits)
-                    return True
+                    result = True
             else:
                 hits = 0
 
         wall_sleep(period)
 
-    return False
+    return result
 
 
 def move_step(cmd_pub, tw_go, tw_stop, move_time, pub_rate_hz, pub_state=None):

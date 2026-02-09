@@ -460,13 +460,14 @@ def main():
         pub_state.publish(f"EVENT=BASELINE0_OK value={baseline0:.1f}")
     rospy.loginfo("[Baseline] Set as %.1f", float(baseline0))
 
-    # Find peak (lowest) for 300s + tail baseline avg over last 20s
+    # Find peak (lowest) for 300s + tail baseline avg over last 20s - repeat 3 times, to get 3 estimates of drop threshold (baseline - peak), then average and apply factor
     thresholds = []
     min_values = []
     tail_avgs = []
-
-    for i in range(3):
+    
+    for i in range(CAL_SET_REPEATS):
         rospy.loginfo("[Find peak] 300s / [Find baseline] last 20s of 300s")
+
         flush_input(ser)
 
         threshold, min_v, tail_avg, st = find_min_with_tail_baseline_avg(
@@ -556,7 +557,7 @@ def main():
             pub_state.publish(f"EVENT=BASELINE_FAIL status={st}")
             continue
         pub_state.publish(f"EVENT=BASELINE_OK value={baseline:.1f}")
-        rospy.loginfo("[Baseline] Set as %.1f", float(baseline0))
+        rospy.loginfo("[Baseline] Set as %.1f", float(baseline))
 
 
         # 2) Detect for 300s: exists v where (baseline - v) > drop_threshold

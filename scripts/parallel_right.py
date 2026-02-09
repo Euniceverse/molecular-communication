@@ -3,6 +3,7 @@
 
 import threading
 from collections import deque
+import time
 
 import rospy
 import serial
@@ -14,6 +15,16 @@ from std_msgs.msg import String, Float32
 # -------------------- Param helper --------------------
 def p(name, default):
     return rospy.get_param("~" + name, default)
+
+
+# -------------------- Wall-clock time helpers --------------------
+def wall_now():
+    return time.monotonic()
+
+
+def wall_sleep(dt):
+    # wall-clock sleep (NOT ROS time)
+    rospy.rostime.wallsleep(dt)
 
 
 # -------------------- Serial helpers --------------------
@@ -31,8 +42,9 @@ def flush_input(ser):
 
 
 def wait_for_ready(ser, timeout=5.0):
-    t0 = rospy.Time.now()
-    while not rospy.is_shutdown() and (rospy.Time.now() - t0).to_sec() < float(timeout):
+    # wall-clock timeout (so it won't stretch if /use_sim_time is on)
+    t0 = wall_now()
+    while not rospy.is_shutdown() and (wall_now() - t0) < float(timeout):
         try:
             line = ser.readline().decode("ascii", errors="ignore").strip()
         except Exception:
@@ -63,31 +75,31 @@ def wait_until_running(pub_state=None):
         pub_state.publish("STATE=WAIT_START")
     rospy.loginfo("Waiting for START... (publish 'start' to control topic)")
     while not rospy.is_shutdown() and not _run_event.is_set():
-        rospy.sleep(0.1)
+        wall_sleep(0.1)
 
 
 def sleep_while_running(duration_s, pub_state=None):
     """
-    Sleep up to duration_s but return False early if STOP happens.
-    True  = slept full duration
+    Wall-clock sleep up to duration_s but return False early if STOP happens.
+    True  = slept full duration (wall time)
     False = stopped/paused during sleep
     """
-    t0 = rospy.Time.now()
+    t0 = wall_now()
     while not rospy.is_shutdown():
         if not _run_event.is_set():
             if pub_state:
                 pub_state.publish("STATE=PAUSED_DURING_SLEEP")
             return False
-        if (rospy.Time.now() - t0).to_sec() >= float(duration_s):
+        if (wall_now() - t0) >= float(duration_s):
             return True
-        rospy.sleep(0.02)
+        wall_sleep(0.02)
 
 
 # -------------------- Robot stop helpers --------------------
 def publish_stop(cmd_pub, tw_stop, repeats=12):
     for _ in range(int(repeats)):
         cmd_pub.publish(tw_stop)
-        rospy.sleep(0.02)
+        wall_sleep(0.02)
 
 
 def emergency_stop(ser, cmd_pub, tw_stop, pub_state=None, stop_stream=True):
@@ -116,7 +128,7 @@ def handle_pause(ser, cmd_pub, tw_stop, pub_state):
         pub_state.publish("STATE=RESUMED")
     try:
         write_cmd(ser, "STREAM1")
-        rospy.sleep(0.1)
+        wall_sleep(0.1)
         flush_input(ser)
     except Exception:
         pass
@@ -206,21 +218,17 @@ def spray_step(ser, spray_time, pub_state=None):
 
 
 def baseline_avg_for(sampler: SerialSampler, duration_s, pub_state=None, poll_hz=20.0):
-    """
-    Average over samples that arrive during this duration.
-    Returns (avg, status) where status in {"OK","PAUSED","NO_DATA"}
-    """
     if pub_state:
         pub_state.publish(f"STATE=BASELINE_AVG t={float(duration_s):.1f}")
 
     sampler.clear_buffer()
-    t0 = rospy.Time.now().to_sec()
+    t0 = wall_now()
 
     s = 0.0
     n = 0
+    period = 1.0 / float(poll_hz) if poll_hz > 0 else 0.05
 
-    rate = rospy.Rate(float(poll_hz))
-    while not rospy.is_shutdown() and (rospy.Time.now().to_sec() - t0) < float(duration_s):
+    while not rospy.is_shutdown() and (wall_now() - t0) < float(duration_s):
         if not _run_event.is_set():
             return None, "PAUSED"
 
@@ -228,7 +236,7 @@ def baseline_avg_for(sampler: SerialSampler, duration_s, pub_state=None, poll_hz
             s += float(v)
             n += 1
 
-        rate.sleep()
+        wall_sleep(period)
 
     if n == 0:
         return None, "NO_DATA"
@@ -240,53 +248,51 @@ def find_min_with_tail_baseline_avg(
     duration_s,
     tail_s=20.0,
     pub_state=None,
-    sense_rate_hz=10.0,
+    poll_hz=20.0,
     baseline=None,
 ):
+    """
+    Uses the sampler buffer (no snapshot/seq), and wall-clock duration.
+    Returns: (threshold_drop, min_v, tail_avg, status)
+    """
     if pub_state:
         pub_state.publish(f"STATE=FIND_MIN t={float(duration_s):.1f} tail={float(tail_s):.1f}")
 
     if baseline is None:
         return None, None, None, "NO_BASELINE"
 
-    start_seq, _, _ = sampler.snapshot()
-    min_v = None
+    sampler.clear_buffer()
+    t0 = wall_now()
+    period = 1.0 / float(poll_hz) if poll_hz > 0 else 0.05
+    tail_start = max(0.0, float(duration_s) - float(tail_s))
 
+    min_v = None
     tail_sum = 0.0
     tail_n = 0
 
-    rate = rospy.Rate(float(sense_rate_hz))
-    t0 = rospy.Time.now()
-
-    while not rospy.is_shutdown():
+    while not rospy.is_shutdown() and (wall_now() - t0) < float(duration_s):
         if not _run_event.is_set():
             return None, None, None, "PAUSED"
 
-        elapsed = (rospy.Time.now() - t0).to_sec()
-        if elapsed >= float(duration_s):
-            break
-
-        seq, v, _ = sampler.snapshot()
-        if v is not None and seq > start_seq:
-            start_seq = seq
-
-            if min_v is None or v < min_v:
+        elapsed = wall_now() - t0
+        for _, v in sampler.pop_all():
+            v = float(v)
+            if (min_v is None) or (v < min_v):
                 min_v = v
-
-            if elapsed >= float(duration_s) - float(tail_s):
-                tail_sum += float(v)
+            if elapsed >= tail_start:
+                tail_sum += v
                 tail_n += 1
 
-        rate.sleep()
+        wall_sleep(period)
 
     if min_v is None:
         return None, None, None, "NO_DATA"
 
     drop = float(baseline) - float(min_v)
-    threshold = max(0.0, drop) 
-
+    threshold = max(0.0, drop)
     tail_avg = (tail_sum / tail_n) if tail_n > 0 else None
     return threshold, min_v, tail_avg, "OK"
+
 
 def detect_drop_for(
     sampler: SerialSampler,
@@ -294,56 +300,57 @@ def detect_drop_for(
     baseline,
     drop_threshold,
     pub_state=None,
-    sense_rate_hz=10.0
+    poll_hz=20.0,
+    hits_required=3,
 ):
     """
-    Detect if there exists any sample v such that:
-      (baseline - v) > drop_threshold
-
-    Returns:
-      True  = detected within duration
-      False = not detected
-      None  = paused/stopped during detection
+    Debounced detect: require hits_required samples where (baseline - v) > drop_threshold.
+    Returns: True / False / None (paused)
     """
-    result = False
     if pub_state:
         pub_state.publish(
             f"STATE=DETECT_DROP t={float(duration_s):.1f} baseline={float(baseline):.1f} dthr={float(drop_threshold):.1f}"
         )
 
-    start_seq, _, _ = sampler.snapshot()
-    rate = rospy.Rate(float(sense_rate_hz))
-    t0 = rospy.Time.now()
+    sampler.clear_buffer()
+    t0 = wall_now()
+    period = 1.0 / float(poll_hz) if poll_hz > 0 else 0.05
 
-    while not rospy.is_shutdown() and (rospy.Time.now() - t0).to_sec() < float(duration_s):
+    hits = 0
+
+    while not rospy.is_shutdown() and (wall_now() - t0) < float(duration_s):
         if not _run_event.is_set():
             return None
 
-        seq, v, _ = sampler.snapshot()
-        if v is not None and seq > start_seq:
-            start_seq = seq
-
+        for _, v in sampler.pop_all():
             drop = float(baseline) - float(v)
-            if drop > float(drop_threshold) and result is False:
-                if pub_state:
-                    pub_state.publish(f"EVENT=DROP_FOUND v={float(v):.1f} drop={drop:.1f}")
-                rospy.loginfo("DROP_FOUND: v=%.1f drop=%.1f", float(v), float(drop))
-                result = True
-        rate.sleep()
+            if drop > float(drop_threshold):
+                hits += 1
+                if hits >= int(hits_required):
+                    if pub_state:
+                        pub_state.publish(f"EVENT=DROP_FOUND v={float(v):.1f} drop={drop:.1f} hits={hits}")
+                    rospy.loginfo("DROP_FOUND: v=%.1f drop=%.1f hits=%d", float(v), float(drop), hits)
+                    return True
+            else:
+                hits = 0
 
-    return result
+        wall_sleep(period)
+
+    return False
 
 
 def move_step(cmd_pub, tw_go, tw_stop, move_time, pub_rate_hz, pub_state=None):
     if pub_state:
         pub_state.publish(f"STATE=MOVE t={float(move_time):.1f}")
-    rate = rospy.Rate(float(pub_rate_hz))
-    t0 = rospy.Time.now()
-    while not rospy.is_shutdown() and (rospy.Time.now() - t0).to_sec() < float(move_time):
+
+    period = 1.0 / float(pub_rate_hz) if pub_rate_hz > 0 else 0.05
+    t0 = wall_now()
+    while not rospy.is_shutdown() and (wall_now() - t0) < float(move_time):
         if not _run_event.is_set():
             break
         cmd_pub.publish(tw_go)
-        rate.sleep()
+        wall_sleep(period)
+
     publish_stop(cmd_pub, tw_stop, repeats=12)
     if pub_state:
         pub_state.publish("STATE=MOVE_DONE")
@@ -375,7 +382,9 @@ def main():
     PEAK_300               = float(p("peak_300", 300.0))
     TAIL_20                = float(p("tail_20", 20.0))
 
-    THRESH_FACTOR          = float(p("threshold_factor", 0.5))  # threshold = (baseline - peak_min) * factor
+    CAL_SET_REPEATS        = int(p("cal_set_repeats", 3))
+
+    THRESH_FACTOR          = float(p("threshold_factor", 0.5))
     DROP_THR_FALLBACK      = float(p("drop_threshold_fallback", 300.0))
 
     WAIT_20_AFTER_THRESH   = float(p("wait_20_after_thresh", 20.0))
@@ -387,11 +396,10 @@ def main():
     LOOP_BASELINE_20       = float(p("loop_baseline_20", 20.0))
     LOOP_DETECT_300        = float(p("loop_detect_300", 300.0))
 
-    WAIT_20_IF_DETECTED    = float(p("wait_20_if_detected", 20.0))
-
     # Sampling
     SAMPLE_HZ              = float(p("sample_hz", 20.0))
-    
+    POLL_HZ                = float(p("poll_hz", SAMPLE_HZ))
+
     # Motion
     SPEED_LIN              = float(p("speed_linear", -0.04))
     SPEED_ANG              = float(p("speed_angular", 0.0))
@@ -429,14 +437,14 @@ def main():
     if USE_READY:
         if not wait_for_ready(ser, 5.0):
             rospy.logwarn("No 'READY' seen, falling back to fixed delay")
-            rospy.sleep(2.5)
+            wall_sleep(2.5)
     else:
-        rospy.sleep(2.5)
+        wall_sleep(2.5)
 
     # Start streaming
     pub_state.publish("STATE=STREAM_ON")
     write_cmd(ser, "STREAM1")
-    rospy.sleep(0.1)
+    wall_sleep(0.1)
     flush_input(ser)
 
     # Start constant sampler
@@ -444,7 +452,6 @@ def main():
     sampler.start()
 
     # -------------------- PRE-PHASE --------------------
-    # wait 100s
     rospy.loginfo("[Wait] 100s")
     pub_state.publish(f"STATE=WAIT_100 t={WAIT_100:.1f}")
     while not rospy.is_shutdown():
@@ -455,7 +462,6 @@ def main():
             break
 
     rospy.loginfo("[Spray] 10s, [Wait] 290s: repeat 3 times")
-    # spray 10s + wait 290s, repeated 3 times as a set
     pub_state.publish(f"STATE=PRE_SPRAY_SET repeats={PRE_SET_REPEATS}")
     for i in range(int(PRE_SET_REPEATS)):
         if rospy.is_shutdown():
@@ -463,7 +469,7 @@ def main():
             return
         if not _run_event.is_set():
             handle_pause(ser, cmd_pub, tw_stop, pub_state)
-        
+
         rospy.loginfo("[Spray] 10s")
         pub_state.publish(f"STATE=PRE_SPRAY i={i+1}/{PRE_SET_REPEATS} t={PRE_SPRAY_TIME:.1f}")
         if not spray_step(ser, PRE_SPRAY_TIME, pub_state=pub_state):
@@ -475,41 +481,37 @@ def main():
             continue
 
     # -------------------- CALIBRATION --------------------
-    # baseline avg 20s
     rospy.loginfo("[Baseline] 20s")
+    baseline0 = None
     while not rospy.is_shutdown():
         if not _run_event.is_set():
             handle_pause(ser, cmd_pub, tw_stop, pub_state)
             continue
 
-        baseline, st = baseline_avg_for(
-            sampler, BASELINE_20_CAL, pub_state=pub_state, poll_hz=POLL_HZ
-        )
+        baseline0, st = baseline_avg_for(sampler, BASELINE_20_CAL, pub_state=pub_state, poll_hz=POLL_HZ)
         if st == "PAUSED":
             continue
-        if baseline is None:
+        if baseline0 is None:
             pub_state.publish(f"EVENT=BASELINE_NO_DATA status={st}")
             continue
-        pub_state.publish(f"EVENT=BASELINE_OK value={baseline:.1f}")
+        pub_state.publish(f"EVENT=BASELINE_OK value={baseline0:.1f}")
         break
-    rospy.loginfo("[Baseline] Set as %.1f", float(baseline))
+    rospy.loginfo("[Baseline] Set as %.1f", float(baseline0))
 
-    # find peak for 300s + tail baseline avg (last 20s)
     thresholds = []
     min_values = []
     tail_avgs = []
 
-    for i in range(CAL_SET_REPEATS):
+    for i in range(int(CAL_SET_REPEATS)):
         rospy.loginfo("[Find peak] 300s / [Find baseline] last 20s of 300s")
-        flush_input(ser)
 
         threshold, min_v, tail_avg, st = find_min_with_tail_baseline_avg(
             sampler,
             PEAK_300,
             tail_s=TAIL_20,
             pub_state=pub_state,
-            sense_rate_hz=SAMPLE_HZ,
-            baseline=baseline0
+            poll_hz=POLL_HZ,
+            baseline=baseline0,
         )
 
         rospy.loginfo(
@@ -527,13 +529,12 @@ def main():
             if tail_avg is not None:
                 tail_avgs.append(float(tail_avg))
 
-    # Decide drop_threshold
     if baseline0 is None or len(thresholds) == 0:
         drop_threshold = DROP_THR_FALLBACK
         pub_state.publish(f"STATE=DROP_THR_FALLBACK dthr={drop_threshold:.1f} reason=NO_DATA")
     else:
-        threshold_avg = sum(thresholds) / float(len(thresholds))   # avg drop (baseline - min)
-        drop_threshold = threshold_avg * float(THRESH_FACTOR)      # your 0.5 factor
+        threshold_avg = sum(thresholds) / float(len(thresholds))
+        drop_threshold = threshold_avg * float(THRESH_FACTOR)
 
         avg_min = sum(min_values) / float(len(min_values))
 
@@ -545,6 +546,11 @@ def main():
 
     rospy.loginfo("[Find threshold] threshold=%.1f", float(drop_threshold))
     rospy.loginfo("[Calibration done]")
+
+    rospy.loginfo("[Wait] 20s after threshold")
+    pub_state.publish(f"STATE=WAIT_20_AFTER_THRESH t={WAIT_20_AFTER_THRESH:.1f}")
+    if not sleep_while_running(WAIT_20_AFTER_THRESH, pub_state=pub_state):
+        handle_pause(ser, cmd_pub, tw_stop, pub_state)
 
     # -------------------- MAIN LOOP --------------------
     pub_state.publish("STATE=MAIN_LOOP")
@@ -575,9 +581,7 @@ def main():
 
         # 3) capture baseline avg for 20s
         rospy.loginfo("[Baseline] 20s")
-        baseline, st = baseline_avg_for(
-            sampler, LOOP_BASELINE_20, pub_state=pub_state, poll_hz=POLL_HZ
-        )
+        baseline, st = baseline_avg_for(sampler, LOOP_BASELINE_20, pub_state=pub_state, poll_hz=POLL_HZ)
         if st == "PAUSED":
             continue
         if baseline is None:
@@ -586,22 +590,22 @@ def main():
         pub_state.publish(f"EVENT=LOOP_BASELINE_OK value={baseline:.1f}")
         rospy.loginfo("[Baseline] Set as %.1f", float(baseline))
 
-        # 4) detect for 300s: exists v where (baseline - v) > drop_threshold
+        # 4) detect for 300s
         rospy.loginfo("[Detect] 300s")
-        flush_input(ser)
         res = detect_drop_for(
-            sampler, LOOP_DETECT_300,
+            sampler,
+            LOOP_DETECT_300,
             baseline=baseline,
             drop_threshold=drop_threshold,
             pub_state=pub_state,
-            poll_hz=POLL_HZ
+            poll_hz=POLL_HZ,
         )
         if res is None:
-            continue  # paused
+            continue
         pub_state.publish(f"EVENT=DETECT_RESULT detected={res}")
         rospy.loginfo("[Detect] Done.")
 
-        # 5) if detected: move, then go back to loop wait 20s
+        # 5) if detected: move
         if res:
             pub_state.publish(f"STATE=MOVE t={MOVE_TIME:.1f}")
             rospy.loginfo("[Move] %.1f seconds", MOVE_TIME)

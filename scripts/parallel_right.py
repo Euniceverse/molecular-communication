@@ -390,8 +390,8 @@ def main():
     WAIT_20_IF_DETECTED    = float(p("wait_20_if_detected", 20.0))
 
     # Sampling
-    POLL_HZ                = float(p("poll_hz", 20.0))  # how often we pop the sampler buffer
-
+    SAMPLE_HZ              = float(p("sample_hz", 20.0))
+    
     # Motion
     SPEED_LIN              = float(p("speed_linear", -0.04))
     SPEED_ANG              = float(p("speed_angular", 0.0))

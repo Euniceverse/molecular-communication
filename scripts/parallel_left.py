@@ -378,22 +378,22 @@ def main():
     CMD_TOPIC     = p("cmd_vel_topic", "/cmd_vel")
 
     # Timing
-    WAIT_80                 = float(p("wait_80", 5.0))
-    BASELINE_20_CAL         = float(p("baseline_20_cal", 5.0))
-    PEAK_300                = float(p("peak_300", 5.0))
-    TAIL_20                 = float(p("tail_20", 5.0))
-    WAIT_20_AFTER_THRESH    = float(p("wait_20_after_thresh", 5.0))
+    WAIT_80                 = float(p("wait_80", 8.0))
+    BASELINE_20_CAL         = float(p("baseline_20_cal", 2.0))
+    PEAK_300                = float(p("peak_300", 30.0))
+    TAIL_20                 = float(p("tail_20", 2.0))
+    WAIT_20_AFTER_THRESH    = float(p("wait_20_after_thresh", 2.0))
 
     CAL_SET_REPEATS         = int(p("cal_set_repeats", 3))
-    CAL_SPRAY_10            = float(p("cal_spray_10", 10.0))
-    CAL_WAIT_290            = float(p("cal_wait_290", 5.0))
+    CAL_SPRAY_10            = float(p("cal_spray_10", 1.0))
+    CAL_WAIT_290            = float(p("cal_wait_290", 29.0))
 
-    BASELINE_20_MAIN        = float(p("baseline_20_main", 5.0))
-    DETECT_300_MAIN         = float(p("detect_300_main", 5.0))
-    WAIT_20_BEFORE_ACTION   = float(p("wait_20_before_action", 5.0))
+    BASELINE_20_MAIN        = float(p("baseline_20_main", 2.0))
+    DETECT_300_MAIN         = float(p("detect_300_main", 30.0))
+    WAIT_20_BEFORE_ACTION   = float(p("wait_20_before_action", 2.0))
 
-    ACTION_SPRAY_10         = float(p("action_spray_10", 10.0))
-    ACTION_WAIT_290         = float(p("action_wait_290", 5.0))
+    ACTION_SPRAY_10         = float(p("action_spray_10", 1.0))
+    ACTION_WAIT_290         = float(p("action_wait_290", 29.0))
 
     THRESH_FACTOR           = float(p("threshold_factor", 0.5))
     DROP_THR_FALLBACK       = float(p("drop_threshold_fallback", 5.0))

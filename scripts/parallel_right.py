@@ -283,11 +283,10 @@ def find_min_with_tail_baseline_avg(
         return None, None, None, "NO_DATA"
 
     drop = float(baseline) - float(min_v)
-    threshold = max(0.0, drop)
+    threshold = max(0.0, drop) 
 
     tail_avg = (tail_sum / tail_n) if tail_n > 0 else None
     return threshold, min_v, tail_avg, "OK"
-
 
 def detect_drop_for(
     sampler: SerialSampler,
@@ -500,7 +499,7 @@ def main():
     min_values = []
     tail_avgs = []
 
-    for i in range(3):
+    for i in range(CAL_SET_REPEATS):
         rospy.loginfo("[Find peak] 300s / [Find baseline] last 20s of 300s")
         flush_input(ser)
 
@@ -585,7 +584,7 @@ def main():
             pub_state.publish(f"EVENT=LOOP_BASELINE_NO_DATA status={st}")
             continue
         pub_state.publish(f"EVENT=LOOP_BASELINE_OK value={baseline:.1f}")
-        rospy.loginfo("[Baseline] Set as %.1f", float(baseline0))
+        rospy.loginfo("[Baseline] Set as %.1f", float(baseline))
 
         # 4) detect for 300s: exists v where (baseline - v) > drop_threshold
         rospy.loginfo("[Detect] 300s")

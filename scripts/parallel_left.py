@@ -398,7 +398,7 @@ def main():
     THRESH_FACTOR           = float(p("threshold_factor", 0.5))
     DROP_THR_FALLBACK       = float(p("drop_threshold_fallback", 5.0))
 
-    SAMPLE_HZ               = float(p("sample_hz", 10.0))
+    SAMPLE_HZ               = float(p("sample_hz", 20.0))
 
     # Motion
     SPEED_LIN               = float(p("speed_linear", -0.04))

@@ -211,7 +211,7 @@ def spray_step(ser, spray_time, pub_state=None):
     return ok
 
 
-def baseline_avg_for(sampler: SerialSampler, duration_s, pub_state=None, sense_rate_hz=10.0):
+def baseline_avg_for(sampler: SerialSampler, duration_s, pub_state=None, sense_rate_hz=20.0):
     """
     Average over NEW samples arriving during this duration (wall-clock duration).
     Returns (avg, status) where status in {"OK","PAUSED","NO_DATA"}
@@ -303,7 +303,7 @@ def detect_drop_for(
     baseline,
     drop_threshold,
     pub_state=None,
-    sense_rate_hz=10.0
+    sense_rate_hz=20.0
 ):
     """
     Detect if there exists any sample v such that:

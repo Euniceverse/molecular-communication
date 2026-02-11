@@ -373,6 +373,7 @@ def main():
     STATE_TOPIC   = p("state_topic", "/molecular/tx/state")
     CMD_TOPIC     = p("cmd_vel_topic", "/cmd_vel")
 
+
     # ---- Requested timing/behavior ----
     WAIT_100               = float(p("wait_100", 10.0))
 

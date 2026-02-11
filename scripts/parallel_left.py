@@ -369,8 +369,8 @@ def main():
 
     # Topics
     CONTROL_TOPIC = p("control_topic", "/molecular_demo/control")
-    RAW_TOPIC     = p("raw_topic",   "/molecular/tx/raw")
-    STATE_TOPIC   = p("state_topic", "/molecular/tx/state")
+    RAW_TOPIC     = p("raw_topic",   "/left/molecular/tx/raw")
+    STATE_TOPIC   = p("state_topic", "/left/molecular/tx/state")
     CMD_TOPIC     = p("cmd_vel_topic", "/cmd_vel")
 
     # ---- Requested timing/behavior ----

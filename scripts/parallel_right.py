@@ -610,7 +610,11 @@ def main():
             pub_state.publish(f"STATE=MOVE t={MOVE_TIME:.1f}")
             rospy.loginfo("[Move] %.1f seconds", MOVE_TIME)
             move_step(cmd_pub, tw_go, tw_stop, MOVE_TIME, PUB_RATE_HZ, pub_state=pub_state)
-
+        else:
+            rospy.loginfo("[Wait] 2s")
+            pub_state.publish(f"STATE=LOOP_NOT_MOVE_WAIT t={MOVE_TIME:.1f}")
+            if not sleep_while_running(MOVE_TIME, pub_state=pub_state):
+                continue
     sampler.stop()
 
 

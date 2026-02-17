@@ -374,7 +374,7 @@ def main():
     CMD_TOPIC     = p("cmd_vel_topic", "/cmd_vel")
 
     # ---- Requested timing/behavior ----
-    WAIT_100               = float(p("wait_100", 100.0))
+    WAIT_100               = float(p("wait_100", 300.0))
 
     PRE_SPRAY_TIME         = float(p("pre_spray_time", 10.0))
     PRE_SET_REPEATS        = int(p("pre_set_repeats", 3))

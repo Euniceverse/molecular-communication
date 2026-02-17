@@ -551,12 +551,7 @@ def main():
 
     rospy.loginfo("[Find threshold] threshold=%.1f", float(drop_threshold))
     rospy.loginfo("[Calibration done]")
-
-    rospy.loginfo("[Wait] 20s after threshold")
-    pub_state.publish(f"STATE=WAIT_20_AFTER_THRESH t={WAIT_20_AFTER_THRESH:.1f}")
-    if not sleep_while_running(WAIT_20_AFTER_THRESH, pub_state=pub_state):
-        handle_pause(ser, cmd_pub, tw_stop, pub_state)
-
+    
     # -------------------- MAIN LOOP --------------------
     pub_state.publish("STATE=MAIN_LOOP")
     rospy.loginfo("Entering main loop...")
@@ -615,7 +610,11 @@ def main():
             pub_state.publish(f"STATE=MOVE t={MOVE_TIME:.1f}")
             rospy.loginfo("[Move] %.1f seconds", MOVE_TIME)
             move_step(cmd_pub, tw_go, tw_stop, MOVE_TIME, PUB_RATE_HZ, pub_state=pub_state)
-
+        else:
+            rospy.loginfo("[Wait] 2s")
+            pub_state.publish(f"STATE=LOOP_NOT_MOVE_WAIT t={MOVE_TIME:.1f}")
+            if not sleep_while_running(MOVE_TIME, pub_state=pub_state):
+                continue
     sampler.stop()
 
 

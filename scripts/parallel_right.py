@@ -376,9 +376,9 @@ def main():
     # ---- Requested timing/behavior ----
     WAIT_100               = float(p("wait_100", 300.0))
 
-    PRE_SPRAY_TIME         = float(p("pre_spray_time", 10.0))
+    PRE_SPRAY_TIME         = float(p("pre_spray_time", 5.0))
     PRE_SET_REPEATS        = int(p("pre_set_repeats", 3))
-    PRE_WAIT_290           = float(p("pre_wait_290", 290.0))
+    PRE_WAIT_290           = float(p("pre_wait_290", 295.0))
 
     BASELINE_20_CAL        = float(p("baseline_20_cal", 20.0))
     PEAK_300               = float(p("peak_300", 300.0))
@@ -392,11 +392,11 @@ def main():
     WAIT_20_AFTER_THRESH   = float(p("wait_20_after_thresh", 20.0))
 
     LOOP_WAIT_20           = float(p("loop_wait_20", 20.0))
-    LOOP_SPRAY_10          = float(p("loop_spray_10", 10.0))
-    LOOP_WAIT_290          = float(p("loop_wait_290", 290.0))
+    LOOP_SPRAY_10          = float(p("loop_spray_10", 5.0))
+    LOOP_WAIT_290          = float(p("loop_wait_290", 145.0))
 
     LOOP_BASELINE_20       = float(p("loop_baseline_20", 20.0))
-    LOOP_DETECT_300        = float(p("loop_detect_300", 300.0))
+    LOOP_DETECT_300        = float(p("loop_detect_300",150.0))
 
     # Sampling
     SAMPLE_HZ              = float(p("sample_hz", 20.0))

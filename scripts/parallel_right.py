@@ -507,6 +507,7 @@ def main():
             return
         if not _run_event.is_set():
             handle_pause(ser, cmd_pub, tw_stop, pub_state)
+            continue
 
         rospy.loginfo("[Spray] 10s")
         pub_state.publish(f"STATE=PRE_SPRAY i={i+1}/{PRE_SET_REPEATS} t={PRE_SPRAY_TIME:.1f}")
@@ -521,6 +522,7 @@ def main():
     while not rospy.is_shutdown():
         if not _run_event.is_set():
             handle_pause(ser, cmd_pub, tw_stop, pub_state)
+            continue
 
         rospy.loginfo("[Spray] 10s")
         pub_state.publish(f"STATE=PRE_SPRAY i=1/{PRE_SET_REPEATS} t={PRE_SPRAY_TIME:.1f}")
@@ -579,8 +581,8 @@ def main():
             if tail_avg is not None:
                 tail_avgs.append(float(tail_avg))
 
-        baseline0=tail_avg
-
+    if tail_avg is not None:
+        baseline0 = float(tail_avg)
 
     if baseline0 is None or len(thresholds) == 0:
         drop_threshold = DROP_THR_FALLBACK
@@ -612,9 +614,10 @@ def main():
         while not rospy.is_shutdown():
             if not _run_event.is_set():
                 handle_pause(ser, cmd_pub, tw_stop, pub_state)
+                continue
 
             rospy.loginfo("[Spray] 10s")
-            pub_state.publish(f"STATE=PRE_SPRAY i=1{PRE_SET_REPEATS} t={PRE_SPRAY_TIME:.1f}")
+            pub_state.publish(f"STATE=PRE_SPRAY i=1/{PRE_SET_REPEATS} t={PRE_SPRAY_TIME:.1f}")
             if not spray_step(ser, PRE_SPRAY_TIME, pub_state=pub_state):
                 continue
 

@@ -544,8 +544,7 @@ def main():
 
         # store it as candidate baseline0 (tail-of-wait baseline)
         pub_state.publish(f"EVENT=TAIL_BASELINE_OK value={baseline_tail:.1f}")
-        if tail_avg is not None:
-            baseline0 = float(tail_avg)
+        baseline0 = float(baseline_tail)
         break
 
     # -------------------- CALIBRATION --------------------

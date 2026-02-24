@@ -243,6 +243,44 @@ def baseline_avg_for(sampler: SerialSampler, duration_s, pub_state=None, poll_hz
     return (s / n), "OK"
 
 
+def wait_with_tail_baseline(
+    sampler: SerialSampler,
+    wait_total_s: float,
+    tail_baseline_s: float,
+    pub_state=None,
+    poll_hz: float = 20.0,
+    label: str = "PRE_WAIT",
+):
+    wait_total_s = float(wait_total_s)
+    tail_baseline_s = float(tail_baseline_s)
+
+    if tail_baseline_s <= 0.0:
+        if pub_state:
+            pub_state.publish(f"STATE={label} t={wait_total_s:.1f}")
+        ok = sleep_while_running(wait_total_s, pub_state=pub_state)
+        return (None, "PAUSED") if not ok else (None, "OK")
+
+    tail_baseline_s = min(tail_baseline_s, wait_total_s)
+    head_wait = max(0.0, wait_total_s - tail_baseline_s)
+
+    if pub_state:
+        pub_state.publish(f"STATE={label}_HEAD t={head_wait:.1f} total={wait_total_s:.1f}")
+    if head_wait > 0:
+        if not sleep_while_running(head_wait, pub_state=pub_state):
+            return None, "PAUSED"
+
+    if pub_state:
+        pub_state.publish(f"STATE={label}_TAIL_BASELINE t={tail_baseline_s:.1f}")
+
+    baseline, st = baseline_avg_for(
+        sampler,
+        tail_baseline_s,
+        pub_state=pub_state,
+        poll_hz=poll_hz,
+    )
+    return baseline, st
+
+
 def find_min_with_tail_baseline_avg(
     sampler: SerialSampler,
     duration_s,
@@ -532,12 +570,6 @@ def main():
 
     rospy.loginfo("[Find threshold] threshold=%.1f", float(drop_threshold))
 
-    rospy.loginfo("[Wait] 20s after threshold")
-    pub_state.publish(f"STATE=WAIT_20_AFTER_THRESH t={WAIT_20_AFTER_THRESH:.1f}")
-    if not sleep_while_running(WAIT_20_AFTER_THRESH, pub_state=pub_state):
-        handle_pause(ser, cmd_pub, tw_stop, pub_state)
-
-    
     rospy.loginfo("[Spray] 10s, [Wait] 290s: repeat 3 times")
     pub_state.publish(f"STATE=PRE_SPRAY_SET repeats={PRE_SET_REPEATS}")
     for i in range(int(PRE_SET_REPEATS)):
@@ -558,6 +590,8 @@ def main():
             continue
     rospy.loginfo("[Calibration done]")
 
+    baseline = baseline0
+
     # -------------------- MAIN LOOP --------------------
     pub_state.publish("STATE=MAIN_LOOP")
     rospy.loginfo("Entering main loop...")
@@ -567,17 +601,6 @@ def main():
             handle_pause(ser, cmd_pub, tw_stop, pub_state)
             continue
 
-         # 3) capture baseline avg for 20s
-        rospy.loginfo("[Baseline] 20s")
-        baseline, st = baseline_avg_for(sampler, LOOP_BASELINE_20, pub_state=pub_state, poll_hz=POLL_HZ)
-        if st == "PAUSED":
-            continue
-        if baseline is None:
-            pub_state.publish(f"EVENT=LOOP_BASELINE_NO_DATA status={st}")
-            continue
-        pub_state.publish(f"EVENT=LOOP_BASELINE_OK value={baseline:.1f}")
-        rospy.loginfo("[Baseline] Set as %.1f", float(baseline))
-       
         # 4) detect for 300s
         rospy.loginfo("[Detect] 300s")
         res = detect_drop_for(
@@ -593,13 +616,6 @@ def main():
         pub_state.publish(f"EVENT=DETECT_RESULT detected={res}")
         rospy.loginfo("[Detect] Done.")
 
-        # 1) wait 20s
-        rospy.loginfo("[Wait] 20s")
-        pub_state.publish(f"STATE=LOOP_WAIT_20 t={LOOP_WAIT_20:.1f}")
-        if not sleep_while_running(LOOP_WAIT_20, pub_state=pub_state):
-            continue
-        rospy.loginfo("[Wait] Done")
-
         # 2)  if detected: spray 10s once + wait 290s
         if res:
             rospy.loginfo("[Spray] 10s")
@@ -607,9 +623,19 @@ def main():
             if not spray_step(ser, LOOP_SPRAY_10, pub_state=pub_state):
                 continue
 
-            rospy.loginfo("[Wait] 290s")
-            pub_state.publish(f"STATE=LOOP_POST_SPRAY_WAIT t={LOOP_WAIT_290:.1f}")
-            if not sleep_while_running(LOOP_WAIT_290, pub_state=pub_state):
+            rospy.loginfo("[Wait] 290s (baseline in tail)")
+            baseline, st = wait_with_tail_baseline(
+                sampler,
+                PRE_WAIT_290,
+                BASELINE_20_CAL,
+                pub_state=pub_state,
+                poll_hz=POLL_HZ,
+                label="PRE_WAIT",
+            )
+            if st == "PAUSED":
+                continue
+            if baseline is None:
+                pub_state.publish(f"EVENT=BASELINE_NO_DATA status={st}")
                 continue
 
         # 5) move

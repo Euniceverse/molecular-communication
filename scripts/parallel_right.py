@@ -250,34 +250,64 @@ def wait_with_tail_baseline(
     poll_hz: float = 20.0,
     label: str = "PRE_WAIT",
 ):
+    """
+    Returns: (tail_avg, status)
+      status: "OK" | "PAUSED" | "NO_DATA"
+    """
     wait_total_s = float(wait_total_s)
     tail_baseline_s = float(tail_baseline_s)
 
+    if wait_total_s <= 0.0:
+        return None, "OK"
+
+    if pub_state:
+        pub_state.publish(f"STATE={label} t={wait_total_s:.1f} tail={tail_baseline_s:.1f}")
+
     if tail_baseline_s <= 0.0:
-        if pub_state:
-            pub_state.publish(f"STATE={label} t={wait_total_s:.1f}")
         ok = sleep_while_running(wait_total_s, pub_state=pub_state)
         return (None, "PAUSED") if not ok else (None, "OK")
 
     tail_baseline_s = min(tail_baseline_s, wait_total_s)
-    head_wait = max(0.0, wait_total_s - tail_baseline_s)
+    tail_start = max(0.0, wait_total_s - tail_baseline_s)
+
+    sampler.clear_buffer()
+    t0 = wall_now()
+    period = 1.0 / float(poll_hz) if poll_hz > 0 else 0.05
+
+    tail_sum = 0.0
+    tail_n = 0
 
     if pub_state:
-        pub_state.publish(f"STATE={label}_HEAD t={head_wait:.1f} total={wait_total_s:.1f}")
-    if head_wait > 0:
-        if not sleep_while_running(head_wait, pub_state=pub_state):
+        pub_state.publish(f"STATE={label}_HEAD t={tail_start:.1f} total={wait_total_s:.1f}")
+
+    while not rospy.is_shutdown() and (wall_now() - t0) < wait_total_s:
+        if not _run_event.is_set():
+            if pub_state:
+                pub_state.publish(f"STATE={label}_PAUSED")
             return None, "PAUSED"
 
-    if pub_state:
-        pub_state.publish(f"STATE={label}_TAIL_BASELINE t={tail_baseline_s:.1f}")
+        elapsed = wall_now() - t0
 
-    baseline, st = baseline_avg_for(
-        sampler,
-        tail_baseline_s,
-        pub_state=pub_state,
-        poll_hz=poll_hz,
-    )
-    return baseline, st
+        if pub_state and (elapsed >= tail_start) and (tail_n == 0):
+            pub_state.publish(f"STATE={label}_TAIL_BASELINE t={tail_baseline_s:.1f}")
+
+        for _, v in sampler.pop_all():
+            v = float(v)
+            if elapsed >= tail_start:
+                tail_sum += v
+                tail_n += 1
+
+        wall_sleep(period)
+
+    if tail_n == 0:
+        if pub_state:
+            pub_state.publish(f"EVENT=TAIL_BASELINE_NO_DATA tail={tail_baseline_s:.1f}")
+        return None, "NO_DATA"
+
+    tail_avg = tail_sum / float(tail_n)
+    if pub_state:
+        pub_state.publish(f"EVENT=TAIL_BASELINE_OK value={tail_avg:.1f} n={tail_n}")
+    return tail_avg, "OK"
 
 def find_min_with_tail_baseline_avg(
     sampler: SerialSampler,

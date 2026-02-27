@@ -647,18 +647,18 @@ def main():
                 continue
 
             rospy.loginfo("[Spray] 10s")
-            pub_state.publish(f"STATE=PRE_SPRAY i=1/{PRE_SET_REPEATS} t={PRE_SPRAY_TIME:.1f}")
-            if not spray_step(ser, PRE_SPRAY_TIME, pub_state=pub_state):
+            pub_state.publish(f"STATE=LOOP_SPRAY i=1 t={LOOP_SPRAY_10:.1f}")
+            if not spray_step(ser, LOOP_SPRAY_10, pub_state=pub_state):
                 continue
 
             rospy.loginfo("[Wait] 290s (baseline in tail)")
             baseline_tail, st = wait_with_tail_baseline(
                 sampler,
-                PRE_WAIT_290,
-                BASELINE_20_CAL,
+                LOOP_WAIT_290,
+                LOOP_BASELINE_20,
                 pub_state=pub_state,
                 poll_hz=POLL_HZ,
-                label="PRE_WAIT",
+                label="LOOP_WAIT",
             )
             if st == "PAUSED":
                 continue

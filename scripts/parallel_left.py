@@ -654,11 +654,11 @@ def main():
             rospy.loginfo("[Wait] 290s (baseline in tail)")
             baseline, st = wait_with_tail_baseline(
                 sampler,
-                PRE_WAIT_290,
+                LOOP_WAIT_290,
                 BASELINE_20_CAL,
                 pub_state=pub_state,
                 poll_hz=POLL_HZ,
-                label="PRE_WAIT",
+                label="LOOP_WAIT",
             )
             if st == "PAUSED":
                 continue

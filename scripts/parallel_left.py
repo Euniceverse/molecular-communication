@@ -655,7 +655,7 @@ def main():
             baseline, st = wait_with_tail_baseline(
                 sampler,
                 LOOP_WAIT_290,
-                BASELINE_20_CAL,
+                LOOP_BASELINE_20,
                 pub_state=pub_state,
                 poll_hz=POLL_HZ,
                 label="LOOP_WAIT",

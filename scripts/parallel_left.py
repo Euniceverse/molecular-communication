@@ -644,7 +644,7 @@ def main():
         pub_state.publish(f"EVENT=DETECT_RESULT detected={res}")
         rospy.loginfo("[Detect] Done.")
 
-        # 2)  if detected: spray 10s once + wait 290s
+        # 2)  if detected: spray 10s once + wait 290s + move
         if res:
             rospy.loginfo("[Spray] 10s")
             pub_state.publish(f"STATE=LOOP_SPRAY t={LOOP_SPRAY_10:.1f}")
@@ -666,11 +666,16 @@ def main():
                 pub_state.publish(f"EVENT=BASELINE_NO_DATA status={st}")
                 continue
 
-        # 5) move
-        pub_state.publish(f"STATE=MOVE t={MOVE_TIME:.1f}")
-        rospy.loginfo("[Move] %.1f seconds", MOVE_TIME)
-        move_step(cmd_pub, tw_go, tw_stop, MOVE_TIME, PUB_RATE_HZ, pub_state=pub_state)
-
+            # move
+            pub_state.publish(f"STATE=MOVE t={MOVE_TIME:.1f}")
+            rospy.loginfo("[Move] %.1f seconds", MOVE_TIME)
+            move_step(cmd_pub, tw_go, tw_stop, MOVE_TIME, PUB_RATE_HZ, pub_state=pub_state)
+        else:
+            rospy.loginfo("[No detection] wait %.1f s", MOVE_TIME)
+            pub_state.publish(f"STATE=LOOP_NOT_MOVE_WAIT t={MOVE_TIME:.1f}")
+            if not sleep_while_running(MOVE_TIME, pub_state=pub_state):
+                continue
+                
     sampler.stop()
 
 

@@ -274,7 +274,7 @@ def main():
     PRE_WAIT_290 = float(p("pre_wait_290", 30.0))
 
     # Left robot waits before calibration while right robot calibrates
-    WAIT_BEFORE_CALIBRATION = float(p("wait_before_calibration", 75.0))
+    WAIT_BEFORE_CALIBRATION = float(p("wait_before_calibration", 105.0))
 
     # Main-loop timing
     LOOP_SPRAY_10 = float(p("loop_spray_10", 5.0))

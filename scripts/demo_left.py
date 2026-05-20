@@ -42,30 +42,35 @@ def flush_input(ser):
 
 
 def wait_for_ready(ser, timeout=5.0):
-    # wall-clock timeout (so it won't stretch if /use_sim_time is on)
+    # wall-clock timeout
     t0 = wall_now()
     while not rospy.is_shutdown() and (wall_now() - t0) < float(timeout):
         try:
             line = ser.readline().decode("ascii", errors="ignore").strip()
         except Exception:
             line = ""
+
         if line == "READY":
             return True
+
     return False
 
 
 # -------------------- RUN/PAUSE control --------------------
-_run_event = threading.Event()  # set()=running, clear()=paused
+_run_event = threading.Event()  # set() = running, clear() = paused
 
 
 def control_cb(msg: String):
     cmd = msg.data.strip().lower()
+
     if cmd in ("start", "run", "go"):
         _run_event.set()
         rospy.loginfo("CONTROL: START")
+
     elif cmd in ("stop", "pause"):
         _run_event.clear()
         rospy.logwarn("CONTROL: STOP")
+
     else:
         rospy.logwarn("CONTROL: unknown '%s' (use 'start' or 'stop')", msg.data)
 
@@ -73,7 +78,9 @@ def control_cb(msg: String):
 def wait_until_running(pub_state=None):
     if pub_state:
         pub_state.publish("STATE=WAIT_START")
+
     rospy.loginfo("Waiting for START... (publish 'start' to control topic)")
+
     while not rospy.is_shutdown() and not _run_event.is_set():
         wall_sleep(0.1)
 
@@ -81,17 +88,21 @@ def wait_until_running(pub_state=None):
 def sleep_while_running(duration_s, pub_state=None):
     """
     Wall-clock sleep up to duration_s but return False early if STOP happens.
-    True  = slept full duration (wall time)
+
+    True  = slept full duration
     False = stopped/paused during sleep
     """
     t0 = wall_now()
+
     while not rospy.is_shutdown():
         if not _run_event.is_set():
             if pub_state:
                 pub_state.publish("STATE=PAUSED_DURING_SLEEP")
             return False
+
         if (wall_now() - t0) >= float(duration_s):
             return True
+
         wall_sleep(0.02)
 
 
@@ -103,14 +114,16 @@ def publish_stop(cmd_pub, tw_stop, repeats=12):
 
 
 def emergency_stop(ser, cmd_pub, tw_stop, pub_state=None, stop_stream=True):
-    # TX OFF + robot stop (+ optionally STREAM0)
+    # TX OFF + robot stop + optionally STREAM0
     try:
         write_cmd(ser, "S0")
         if stop_stream:
             write_cmd(ser, "STREAM0")
     except Exception:
         pass
+
     publish_stop(cmd_pub, tw_stop, repeats=12)
+
     if pub_state:
         pub_state.publish("STATE=EMERGENCY_STOP")
 
@@ -119,13 +132,15 @@ def handle_pause(ser, cmd_pub, tw_stop, pub_state):
     # When STOP: TX OFF + STREAM0 + robot stop, then wait for START
     if pub_state:
         pub_state.publish("STATE=PAUSED")
+
     emergency_stop(ser, cmd_pub, tw_stop, pub_state=pub_state, stop_stream=True)
 
     wait_until_running(pub_state=pub_state)
 
-    # On resume: STREAM1 again (sampler thread will keep reading)
+    # On resume: STREAM1 again
     if pub_state:
         pub_state.publish("STATE=RESUMED")
+
     try:
         write_cmd(ser, "STREAM1")
         wall_sleep(0.1)
@@ -134,21 +149,20 @@ def handle_pause(ser, cmd_pub, tw_stop, pub_state):
         pass
 
 
-# -------------------- Constant serial reader (publishes + buffers) --------------------
+# -------------------- Constant serial reader --------------------
 class SerialSampler:
     """
-    A single thread reads from serial continuously:
-      expects lines: 'R <float>'
-    It:
-      - publishes each parsed value to pub_raw
-      - stores recent samples in a thread-safe buffer for windowed computations
+    Continuously reads serial lines of the form:
+        R <float>
+
+    It publishes each parsed value and stores recent samples.
     """
     def __init__(self, ser, pub_raw=None, maxlen=20000):
         self.ser = ser
         self.pub_raw = pub_raw
 
         self._lock = threading.Lock()
-        self._buf = deque(maxlen=maxlen)   # (t_sec, v)
+        self._buf = deque(maxlen=maxlen)
 
         self._running = True
         self._th = threading.Thread(target=self._run, daemon=True)
@@ -168,7 +182,6 @@ class SerialSampler:
             self._buf.clear()
 
     def pop_all(self):
-        """Return all buffered samples and clear the buffer."""
         with self._lock:
             items = list(self._buf)
             self._buf.clear()
@@ -209,136 +222,15 @@ class SerialSampler:
 def spray_step(ser, spray_time, pub_state=None):
     if pub_state:
         pub_state.publish(f"STATE=SPRAY_ON t={float(spray_time):.1f}")
+
     write_cmd(ser, "S1")
     ok = sleep_while_running(spray_time, pub_state=pub_state)
     write_cmd(ser, "S0")
+
     if pub_state:
         pub_state.publish("STATE=SPRAY_OFF")
+
     return ok
-
-
-def baseline_avg_for(sampler: SerialSampler, duration_s, pub_state=None, poll_hz=20.0):
-    if pub_state:
-        pub_state.publish(f"STATE=BASELINE_AVG t={float(duration_s):.1f}")
-
-    sampler.clear_buffer()
-    t0 = wall_now()
-
-    s = 0.0
-    n = 0
-    period = 1.0 / float(poll_hz) if poll_hz > 0 else 0.05
-
-    while not rospy.is_shutdown() and (wall_now() - t0) < float(duration_s):
-        if not _run_event.is_set():
-            return None, "PAUSED"
-
-        for _, v in sampler.pop_all():
-            s += float(v)
-            n += 1
-
-        wall_sleep(period)
-
-    if n == 0:
-        return None, "NO_DATA"
-    return (s / n), "OK"
-
-
-def find_min_with_tail_baseline_avg(
-    sampler: SerialSampler,
-    duration_s,
-    tail_s=20.0,
-    pub_state=None,
-    poll_hz=20.0,
-    baseline=None,
-):
-    """
-    Uses the sampler buffer (no snapshot/seq), and wall-clock duration.
-    Returns: (threshold_drop, min_v, tail_avg, status)
-    """
-    if pub_state:
-        pub_state.publish(f"STATE=FIND_MIN t={float(duration_s):.1f} tail={float(tail_s):.1f}")
-
-    if baseline is None:
-        return None, None, None, "NO_BASELINE"
-
-    sampler.clear_buffer()
-    t0 = wall_now()
-    period = 1.0 / float(poll_hz) if poll_hz > 0 else 0.05
-    tail_start = max(0.0, float(duration_s) - float(tail_s))
-
-    min_v = None
-    tail_sum = 0.0
-    tail_n = 0
-
-    while not rospy.is_shutdown() and (wall_now() - t0) < float(duration_s):
-        if not _run_event.is_set():
-            return None, None, None, "PAUSED"
-
-        elapsed = wall_now() - t0
-        for _, v in sampler.pop_all():
-            v = float(v)
-            if (min_v is None) or (v < min_v):
-                min_v = v
-            if elapsed >= tail_start:
-                tail_sum += v
-                tail_n += 1
-
-        wall_sleep(period)
-
-    if min_v is None:
-        return None, None, None, "NO_DATA"
-
-    drop = float(baseline) - float(min_v)
-    threshold = max(0.0, drop)
-    tail_avg = (tail_sum / tail_n) if tail_n > 0 else None
-    return threshold, min_v, tail_avg, "OK"
-
-
-def detect_drop_for(
-    sampler: SerialSampler,
-    duration_s,
-    baseline,
-    drop_threshold,
-    pub_state=None,
-    poll_hz=20.0,
-    hits_required=3,
-):
-    """
-    Debounced detect: require hits_required samples where (baseline - v) > drop_threshold.
-    Returns: True / False / None (paused)
-    """
-    result = False
-
-    if pub_state:
-        pub_state.publish(
-            f"STATE=DETECT_DROP t={float(duration_s):.1f} baseline={float(baseline):.1f} dthr={float(drop_threshold):.1f}"
-        )
-
-    sampler.clear_buffer()
-    t0 = wall_now()
-    period = 1.0 / float(poll_hz) if poll_hz > 0 else 0.05
-
-    hits = 0
-
-    while not rospy.is_shutdown() and (wall_now() - t0) < float(duration_s):
-        if not _run_event.is_set():
-            return None
-
-        for _, v in sampler.pop_all():
-            drop = float(baseline) - float(v)
-            if drop > float(drop_threshold):
-                hits += 1
-                if hits >= int(hits_required):
-                    if pub_state:
-                        pub_state.publish(f"EVENT=DROP_FOUND v={float(v):.1f} drop={drop:.1f} hits={hits}")
-                    rospy.loginfo("DROP_FOUND: v=%.1f drop=%.1f hits=%d", float(v), float(drop), hits)
-                    result = True
-            else:
-                hits = 0
-
-        wall_sleep(period)
-
-    return result
 
 
 def move_step(cmd_pub, tw_go, tw_stop, move_time, pub_rate_hz, pub_state=None):
@@ -347,96 +239,94 @@ def move_step(cmd_pub, tw_go, tw_stop, move_time, pub_rate_hz, pub_state=None):
 
     period = 1.0 / float(pub_rate_hz) if pub_rate_hz > 0 else 0.05
     t0 = wall_now()
+
     while not rospy.is_shutdown() and (wall_now() - t0) < float(move_time):
         if not _run_event.is_set():
             break
+
         cmd_pub.publish(tw_go)
         wall_sleep(period)
 
     publish_stop(cmd_pub, tw_stop, repeats=12)
+
     if pub_state:
         pub_state.publish("STATE=MOVE_DONE")
 
 
 # -------------------- Main --------------------
 def main():
-    rospy.init_node("molecular_demo_tx")
+    rospy.init_node("molecular_demo_tx_left")
 
     # Serial params
-    PORT      = p("port", "/dev/ttyUSB0")
-    BAUD      = int(p("baud", 9600))
+    PORT = p("port", "/dev/ttyUSB0")
+    BAUD = int(p("baud", 9600))
     USE_READY = bool(p("use_ready", True))
 
     # Topics
     CONTROL_TOPIC = p("control_topic", "/molecular_demo/control")
-    RAW_TOPIC     = p("raw_topic",   "/molecular/tx/raw")
-    STATE_TOPIC   = p("state_topic", "/molecular/tx/state")
-    CMD_TOPIC     = p("cmd_vel_topic", "/cmd_vel")
+    RAW_TOPIC = p("raw_topic", "/molecular/tx/raw")
+    STATE_TOPIC = p("state_topic", "/molecular/tx/state")
+    CMD_TOPIC = p("cmd_vel_topic", "/cmd_vel")
 
+    # Calibration timing
+    PRE_SPRAY_TIME = float(p("pre_spray_time", 5.0))
+    PRE_SET_REPEATS = int(p("pre_set_repeats", 3))
+    PRE_WAIT_290 = float(p("pre_wait_290", 30.0))
 
-    # ---- Requested timing/behavior ----
-    WAIT_100               = float(p("wait_100", 10.0))
+    # Left robot waits before calibration while right robot calibrates
+    WAIT_BEFORE_CALIBRATION = float(p("wait_before_calibration", 75.0))
 
-    PRE_SPRAY_TIME         = float(p("pre_spray_time", 1.0))
-    PRE_SET_REPEATS        = int(p("pre_set_repeats", 3))
-    PRE_WAIT_290           = float(p("pre_wait_290", 29.0))
-
-    BASELINE_20_CAL        = float(p("baseline_20_cal", 2.0))
-    PEAK_300               = float(p("peak_300", 30.0))
-    TAIL_20                = float(p("tail_20", 2.0))
-
-    CAL_SET_REPEATS        = int(p("cal_set_repeats", 3))
-
-    THRESH_FACTOR          = float(p("threshold_factor", 0.5))
-    DROP_THR_FALLBACK      = float(p("drop_threshold_fallback", 5.0))
-
-    WAIT_20_AFTER_THRESH   = float(p("wait_20_after_thresh", 2.0))
-
-    LOOP_WAIT_20           = float(p("loop_wait_20", 5.0))
-    LOOP_SPRAY_10          = float(p("loop_spray_10", 5.0))
-    LOOP_WAIT_290          = float(p("loop_wait_290", 5.0))
-
-    LOOP_BASELINE_20       = float(p("loop_baseline_20", 2.0))
-    LOOP_DETECT_300        = float(p("loop_detect_300", 30.0))
+    # Main-loop timing
+    LOOP_SPRAY_10 = float(p("loop_spray_10", 5.0))
+    LOOP_WAIT_290 = float(p("loop_wait_290", 30.0))
 
     # Sampling
-    SAMPLE_HZ              = float(p("sample_hz", 20.0))
-    POLL_HZ                = float(p("poll_hz", SAMPLE_HZ))
+    SAMPLE_HZ = float(p("sample_hz", 20.0))
 
     # Motion
-    SPEED_LIN              = float(p("speed_linear", -0.04))
-    SPEED_ANG              = float(p("speed_angular", 0.0))
-    MOVE_TIME              = float(p("move_time", 3.0))
-    PUB_RATE_HZ            = float(p("publish_rate", 20.0))
+    SPEED_LIN = float(p("speed_linear", -0.04))
+    SPEED_ANG = float(p("speed_angular", 0.0))
+    MOVE_TIME = float(p("move_time", 3.0))
+    PUB_RATE_HZ = float(p("publish_rate", 20.0))
 
     # ROS I/O
     rospy.Subscriber(CONTROL_TOPIC, String, control_cb, queue_size=10)
-    pub_raw   = rospy.Publisher(RAW_TOPIC, Float32, queue_size=1000)
+    pub_raw = rospy.Publisher(RAW_TOPIC, Float32, queue_size=1000)
     pub_state = rospy.Publisher(STATE_TOPIC, String, queue_size=1000)
-    cmd_pub   = rospy.Publisher(CMD_TOPIC, Twist, queue_size=10)
+    cmd_pub = rospy.Publisher(CMD_TOPIC, Twist, queue_size=10)
 
     rospy.loginfo("Control topic: %s  (send 'start' or 'stop')", CONTROL_TOPIC)
 
-    # Twist
+    # Twist messages
     tw_go = Twist()
     tw_go.linear.x = SPEED_LIN
     tw_go.angular.z = SPEED_ANG
+
     tw_stop = Twist()
 
     # Start paused
     _run_event.clear()
     wait_until_running(pub_state=pub_state)
 
-    # Serial open
+    # Open serial
     pub_state.publish(f"STATE=SERIAL_OPEN port={PORT} baud={BAUD}")
     rospy.loginfo("Opening serial %s @ %d ...", PORT, BAUD)
     ser = serial.Serial(PORT, BAUD, timeout=0.1)
 
-    rospy.on_shutdown(lambda: emergency_stop(ser, cmd_pub, tw_stop, pub_state=pub_state, stop_stream=True))
+    rospy.on_shutdown(
+        lambda: emergency_stop(
+            ser,
+            cmd_pub,
+            tw_stop,
+            pub_state=pub_state,
+            stop_stream=True,
+        )
+    )
 
-    # Arduino handshake (before sampler starts)
+    # Arduino handshake
     pub_state.publish("STATE=ARDUINO_HANDSHAKE")
     rospy.loginfo("Waiting for Arduino handshake...")
+
     if USE_READY:
         if not wait_for_ready(ser, 5.0):
             rospy.logwarn("No 'READY' seen, falling back to fixed delay")
@@ -454,6 +344,53 @@ def main():
     sampler = SerialSampler(ser, pub_raw=pub_raw, maxlen=40000)
     sampler.start()
 
+    # -------------------- WAIT FOR RIGHT ROBOT CALIBRATION --------------------
+    pub_state.publish(
+        f"STATE=WAIT_FOR_RIGHT_CALIBRATION t={WAIT_BEFORE_CALIBRATION:.1f}"
+    )
+    rospy.loginfo(
+        "[Left robot] Waiting %.1f s while right robot calibrates...",
+        WAIT_BEFORE_CALIBRATION,
+    )
+
+    if not sleep_while_running(WAIT_BEFORE_CALIBRATION, pub_state=pub_state):
+        handle_pause(ser, cmd_pub, tw_stop, pub_state)
+
+    # -------------------- LEFT ROBOT CALIBRATION --------------------
+    pub_state.publish(f"STATE=LEFT_CALIBRATION_START repeats={PRE_SET_REPEATS}")
+    rospy.loginfo("[Left calibration] Sending %d calibration pulses...", PRE_SET_REPEATS)
+
+    for i in range(int(PRE_SET_REPEATS)):
+        if rospy.is_shutdown():
+            sampler.stop()
+            return
+
+        if not _run_event.is_set():
+            handle_pause(ser, cmd_pub, tw_stop, pub_state)
+            continue
+
+        rospy.loginfo("[Left calibration] Pulse %d/%d", i + 1, PRE_SET_REPEATS)
+        pub_state.publish(
+            f"STATE=LEFT_CALIBRATION_SPRAY i={i+1}/{PRE_SET_REPEATS} "
+            f"t={PRE_SPRAY_TIME:.1f}"
+        )
+
+        if not spray_step(ser, PRE_SPRAY_TIME, pub_state=pub_state):
+            continue
+
+        if i < int(PRE_SET_REPEATS) - 1:
+            rospy.loginfo(
+                "[Left calibration] Waiting %.1f s before next pulse",
+                PRE_WAIT_290,
+            )
+            pub_state.publish(f"STATE=LEFT_CALIBRATION_WAIT t={PRE_WAIT_290:.1f}")
+
+            if not sleep_while_running(PRE_WAIT_290, pub_state=pub_state):
+                continue
+
+    pub_state.publish("STATE=LEFT_CALIBRATION_DONE")
+    rospy.loginfo("[Left calibration] Calibration pulses done.")
+
     # -------------------- MAIN LOOP --------------------
     pub_state.publish("STATE=MAIN_LOOP")
     rospy.loginfo("Entering main loop...")
@@ -463,20 +400,31 @@ def main():
             handle_pause(ser, cmd_pub, tw_stop, pub_state)
             continue
 
-        rospy.loginfo("[Wait] 290s")
-        pub_state.publish(f"STATE=LOOP_POST_SPRAY_WAIT t={LOOP_WAIT_290:.1f}")
+        # Wait before left robot spray
+        rospy.loginfo("[Left Wait before spray] %.1f s", LOOP_WAIT_290)
+        pub_state.publish(f"STATE=LEFT_WAIT_BEFORE_SPRAY t={LOOP_WAIT_290:.1f}")
+
         if not sleep_while_running(LOOP_WAIT_290, pub_state=pub_state):
             continue
 
-        # 2) spray 10s once + wait 290s
-        rospy.loginfo("[Spray] 10s")
-        pub_state.publish(f"STATE=LOOP_SPRAY t={LOOP_SPRAY_10:.1f}")
+        # Left robot spray
+        rospy.loginfo("[Left Spray] %.1f s", LOOP_SPRAY_10)
+        pub_state.publish(f"STATE=LEFT_LOOP_SPRAY t={LOOP_SPRAY_10:.1f}")
+
         if not spray_step(ser, LOOP_SPRAY_10, pub_state=pub_state):
             continue
 
-        # 5) move
+        # Wait after left robot spray
+        rospy.loginfo("[Left Wait after spray] %.1f s", LOOP_WAIT_290)
+        pub_state.publish(f"STATE=LEFT_WAIT_AFTER_SPRAY t={LOOP_WAIT_290:.1f}")
+
+        if not sleep_while_running(LOOP_WAIT_290, pub_state=pub_state):
+            continue
+
+        # Move
         pub_state.publish(f"STATE=MOVE t={MOVE_TIME:.1f}")
-        rospy.loginfo("[Move] %.1f seconds", MOVE_TIME)
+        rospy.loginfo("[Left Move] %.1f seconds", MOVE_TIME)
+
         move_step(cmd_pub, tw_go, tw_stop, MOVE_TIME, PUB_RATE_HZ, pub_state=pub_state)
 
     sampler.stop()

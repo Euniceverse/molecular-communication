@@ -289,7 +289,7 @@ def main():
     # Motion
     SPEED_LIN = float(p("speed_linear", -0.04))
     SPEED_ANG = float(p("speed_angular", 0.0))
-    MOVE_TIME = float(p("move_time", 3.0))
+    MOVE_TIME = float(p("move_time", 2.0))
     PUB_RATE_HZ = float(p("publish_rate", 20.0))
 
     # ROS I/O

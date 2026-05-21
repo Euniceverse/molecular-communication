@@ -273,8 +273,11 @@ def main():
     PRE_SET_REPEATS = int(p("pre_set_repeats", 3))
     PRE_WAIT_290 = float(p("pre_wait_290", 30.0))
 
-    # Left robot waits before calibration while right robot calibrates
+    # Left waits before calibration while right calibrates and waits 30 s after right's last calibration pulse
     WAIT_BEFORE_CALIBRATION = float(p("wait_before_calibration", 105.0))
+
+    # Left waits 30 s after its last calibration pulse before entering main loop
+    WAIT_AFTER_LEFT_CALIBRATION = float(p("wait_after_left_calibration", 30.0))
 
     # Main-loop timing
     LOOP_SPRAY_10 = float(p("loop_spray_10", 5.0))
@@ -349,7 +352,7 @@ def main():
         f"STATE=WAIT_FOR_RIGHT_CALIBRATION t={WAIT_BEFORE_CALIBRATION:.1f}"
     )
     rospy.loginfo(
-        "[Left robot] Waiting %.1f s while right robot calibrates...",
+        "[Left robot] Waiting %.1f s before left calibration...",
         WAIT_BEFORE_CALIBRATION,
     )
 
@@ -391,6 +394,18 @@ def main():
     pub_state.publish("STATE=LEFT_CALIBRATION_DONE")
     rospy.loginfo("[Left calibration] Calibration pulses done.")
 
+    # Wait 30 s after the last left calibration pulse before entering main loop
+    pub_state.publish(
+        f"STATE=WAIT_AFTER_LEFT_CALIBRATION t={WAIT_AFTER_LEFT_CALIBRATION:.1f}"
+    )
+    rospy.loginfo(
+        "[Left robot] Waiting %.1f s after left calibration...",
+        WAIT_AFTER_LEFT_CALIBRATION,
+    )
+
+    if not sleep_while_running(WAIT_AFTER_LEFT_CALIBRATION, pub_state=pub_state):
+        handle_pause(ser, cmd_pub, tw_stop, pub_state)
+
     # -------------------- MAIN LOOP --------------------
     pub_state.publish("STATE=MAIN_LOOP")
     rospy.loginfo("Entering main loop...")
@@ -400,11 +415,13 @@ def main():
             handle_pause(ser, cmd_pub, tw_stop, pub_state)
             continue
 
-        # Wait before left robot spray
-        rospy.loginfo("[Left Wait before spray] %.1f s", LOOP_WAIT_290)
-        pub_state.publish(f"STATE=LEFT_WAIT_BEFORE_SPRAY t={LOOP_WAIT_290:.1f}")
+        # Wait for right spray 5 s + wait 30 s after right spray
+        left_initial_wait = LOOP_SPRAY_10 + LOOP_WAIT_290
 
-        if not sleep_while_running(LOOP_WAIT_290, pub_state=pub_state):
+        rospy.loginfo("[Left Wait before spray] %.1f s", left_initial_wait)
+        pub_state.publish(f"STATE=LEFT_WAIT_BEFORE_SPRAY t={left_initial_wait:.1f}")
+
+        if not sleep_while_running(left_initial_wait, pub_state=pub_state):
             continue
 
         # Left robot spray
